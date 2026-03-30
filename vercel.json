@@ -1,0 +1,14 @@
+{
+    "builds": [
+        {
+            "src": "dashboard/dashboard_v2.py",
+            "use": "@vercel/python"
+        }
+    ],
+    "routes": [
+        {
+            "src": "/(.*)",
+            "dest": "dashboard/dashboard_v2.py"
+        }
+    ]
+}
