@@ -1,0 +1,1 @@
+from dashboard_v2 import app
