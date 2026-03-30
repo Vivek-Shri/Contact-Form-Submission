@@ -361,7 +361,7 @@
                                         class="text-accent-400 font-medium">browse</span></p>
                                 <p class="text-gray-600 text-xs mt-1">CSV with "Company Name" and "Website URL" columns
                                 </p>
-                                <input type="file" id="scraper-csv-input" accept=".csv" class="hidden">
+                                <input type="file" id="scraper-csv-input" accept=".csv" class="hidden" title="Upload CSV file with websites">
                             </div>
                             <div id="scraper-csv-info" class="hidden mt-3 text-sm text-gray-400">
                                 Loaded: <span id="scraper-csv-count" class="text-accent-400 font-bold">0</span> URLs
@@ -724,11 +724,13 @@
                         <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
                             <h3 class="text-white font-semibold">Google Sheet Data</h3>
                             <div class="flex gap-2 items-center flex-wrap"><select id="sheet-filter-submitted"
+                                    title="Filter by submission status"
                                     class="bg-dark-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none">
                                     <option value="">All Submitted</option>
                                     <option value="Yes">Yes</option>
                                     <option value="No">No</option>
                                 </select><select id="sheet-filter-status"
+                                    title="Filter by status"
                                     class="bg-dark-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none">
                                     <option value="">All Status</option>
                                     <option value="Successful">Successful</option>
