@@ -33,17 +33,24 @@ NOPECHA_API_KEYS   = [
     "sub_1TE68RCRwBwvt6ptOHR2oZ2o",      # Key 1
     "sub_1TGgdMCRwBwvt6pt1NbN2LQx",      # Key 2 (20k solves/day)
 ]
-NOPECHA_API_KEY    = NOPECHA_API_KEYS[0]  # default for balance checks
-_nopecha_key_idx   = 0                    # round-robin counter
-_nopecha_key_lock  = threading.Lock()
+_nopecha_key_states = {k: True for k in NOPECHA_API_KEYS}
+_nopecha_lock = threading.Lock()
+_nopecha_idx = 0
 
-def _next_nopecha_key():
-    """Round-robin between NopeCHA API keys."""
-    global _nopecha_key_idx
-    with _nopecha_key_lock:
-        key = NOPECHA_API_KEYS[_nopecha_key_idx % len(NOPECHA_API_KEYS)]
-        _nopecha_key_idx += 1
-    return key
+def _next_valid_nopecha_key():
+    """Round-robin fetch of the next active API key."""
+    global _nopecha_idx
+    with _nopecha_lock:
+        active_keys = [k for k in NOPECHA_API_KEYS if _nopecha_key_states.get(k, False)]
+        if not active_keys:
+            return None
+        key = active_keys[_nopecha_idx % len(active_keys)]
+        _nopecha_idx += 1
+        return key
+
+def _disable_nopecha_key(key):
+    with _nopecha_lock:
+        _nopecha_key_states[key] = False
 
 MY_FIRST_NAME    = "Uttam Kumar"
 MY_LAST_NAME     = "Tiwari"
@@ -51,6 +58,7 @@ MY_FULL_NAME     = "Uttam Kumar Tiwari"
 MY_EMAIL         = "info@hyperstaff.co"
 MY_PHONE         = "646-798-9403"
 MY_PHONE_INTL    = "+1646-798-9403"
+MY_PIN_CODE      = "110032"
 MY_PHONE_DISPLAY = "+1 (646) 798-9403"
 MY_COMPANY       = "HyperStaff"
 MY_WEBSITE       = "https://hyperstaff.co"
@@ -745,21 +753,24 @@ def _nopecha_token_api(cap_type: str, sitekey: str, url: str) -> str | None:
     JOB_TTL      = 90                   # re-submit job if no answer within 90s
     kw           = {"timeout": 15}      # shorter network timeout too
 
+    nopecha_key = _next_valid_nopecha_key()
+    if not nopecha_key:
+        print("   [NopeCHA] All API keys have exhausted their credits!")
+        return None
+
     try:
         r      = requests.get("https://api.nopecha.com/status",
-                              params={"key": NOPECHA_API_KEY}, timeout=8)
+                              params={"key": nopecha_key}, timeout=8)
         data   = r.json()
         credit = data.get("credit", (data.get("data") or {}).get("credit", -1))
         if credit == 0:
-            print(f"   [NopeCHA] No credits — skipping")
-            return None
-        print(f"   [NopeCHA] Credits: {credit}")
+            print(f"   [NopeCHA] Key out of credits — disabling key ...{nopecha_key[-6:]}")
+            _disable_nopecha_key(nopecha_key)
+            return _nopecha_token_api(cap_type, sitekey, url) # retry with next key
+        print(f"   [NopeCHA] Using key ...{nopecha_key[-6:]} | Credits: {credit}")
     except Exception as e:
-        print(f"   [NopeCHA] Balance check failed ({e}) — proceeding")
+        print(f"   [NopeCHA] Balance check failed ({e}) — proceeding with key ...{nopecha_key[-6:]}")
 
-    # Pick a key for this captcha solve via round-robin
-    nopecha_key = _next_nopecha_key()
-    print(f"   [NopeCHA] Using key ...{nopecha_key[-6:]}")
     print(f"   [NopeCHA] Submitting {cap_type} | timeout={HARD_TIMEOUT}s | url={url[:50]}")
     deadline = _t.time() + HARD_TIMEOUT
     payload  = {
@@ -892,90 +903,91 @@ async def _inject_token(page, token: str, cap_type: str):
 # ============================================================
 
 async def detect_and_solve_captcha(page, iframe=None):
-    async with _nopecha_semaphore:
-        html     = await page.content()
-        page_url = page.url
+    html     = await page.content()
+    page_url = page.url
+    for frame in page.frames:
+        try:
+            if frame.url and frame.url.startswith("http"):
+                html += await frame.content()
+        except Exception:
+            pass
+
+    has_hcaptcha  = bool(re.search(r'h-captcha|hcaptcha\.com/1/api', html, re.I))
+    has_recaptcha = bool(
+        re.search(r'class=["\'][^"\']*g-recaptcha', html, re.I) or
+        re.search(r'data-sitekey', html, re.I) or
+        re.search(r'recaptcha/api2/anchor|recaptcha/enterprise/anchor', html, re.I) or
+        re.search(r'grecaptcha\.render\s*\(', html, re.I)
+    )
+    has_turnstile = bool(re.search(r'cf-turnstile|challenges\.cloudflare\.com/turnstile', html, re.I))
+
+    if not (has_hcaptcha or has_recaptcha or has_turnstile):
+        print("   [Captcha] None detected")
+        return False, "none"
+
+    if has_recaptcha and not has_hcaptcha and not has_turnstile:
+        is_v3 = bool(
+            re.search(r'grecaptcha\.execute\s*\(', html, re.I) or
+            re.search(r'grecaptcha\.ready\s*\(', html, re.I)
+        )
+        cap_type = "recaptcha3" if is_v3 else "recaptcha2"
+    else:
+        cap_type = "hcaptcha" if has_hcaptcha else ("turnstile" if has_turnstile else "recaptcha2")
+
+    print(f"   [Captcha] Detected: {cap_type}")
+
+    sitekey = None
+    for sel in ["[data-sitekey]",".g-recaptcha",".h-captcha","[class*='cf-turnstile']"]:
+        try:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                for attr in ["data-sitekey","data-hcaptcha-sitekey","data-recaptcha-sitekey"]:
+                    sk = await el.get_attribute(attr)
+                    if sk and len(sk) > 10:
+                        sitekey = sk.strip()
+                        break
+            if sitekey:
+                break
+        except Exception:
+            pass
+
+    if not sitekey:
         for frame in page.frames:
             try:
-                if frame.url and frame.url.startswith("http"):
-                    html += await frame.content()
-            except Exception:
-                pass
-
-        has_hcaptcha  = bool(re.search(r'h-captcha|hcaptcha\.com/1/api', html, re.I))
-        has_recaptcha = bool(
-            re.search(r'class=["\'][^"\']*g-recaptcha', html, re.I) or
-            re.search(r'data-sitekey', html, re.I) or
-            re.search(r'recaptcha/api2/anchor|recaptcha/enterprise/anchor', html, re.I) or
-            re.search(r'grecaptcha\.render\s*\(', html, re.I)
-        )
-        has_turnstile = bool(re.search(r'cf-turnstile|challenges\.cloudflare\.com/turnstile', html, re.I))
-
-        if not (has_hcaptcha or has_recaptcha or has_turnstile):
-            print("   [Captcha] None detected")
-            return False, "none"
-
-        if has_recaptcha and not has_hcaptcha and not has_turnstile:
-            is_v3 = bool(
-                re.search(r'grecaptcha\.execute\s*\(', html, re.I) or
-                re.search(r'grecaptcha\.ready\s*\(', html, re.I)
-            )
-            cap_type = "recaptcha3" if is_v3 else "recaptcha2"
-        else:
-            cap_type = "hcaptcha" if has_hcaptcha else ("turnstile" if has_turnstile else "recaptcha2")
-
-        print(f"   [Captcha] Detected: {cap_type}")
-
-        sitekey = None
-        for sel in ["[data-sitekey]",".g-recaptcha",".h-captcha","[class*='cf-turnstile']"]:
-            try:
-                el = page.locator(sel).first
-                if await el.count() > 0:
-                    for attr in ["data-sitekey","data-hcaptcha-sitekey","data-recaptcha-sitekey"]:
-                        sk = await el.get_attribute(attr)
-                        if sk and len(sk) > 10:
-                            sitekey = sk.strip()
-                            break
-                if sitekey:
-                    break
-            except Exception:
-                pass
-
-        if not sitekey:
-            for frame in page.frames:
-                try:
-                    fu = frame.url or ""
-                    if not fu.startswith("http"):
-                        continue
-                    m = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{20,})', fu)
-                    if m:
-                        sitekey = m.group(1).strip()
-                        break
-                except Exception:
-                    pass
-
-        if not sitekey:
-            for pat in [
-                r'data-sitekey=["\']([A-Za-z0-9_-]{20,})["\']',
-                r'"sitekey"\s*:\s*"([A-Za-z0-9_-]{20,})"',
-            ]:
-                m = re.search(pat, html, re.I)
+                fu = frame.url or ""
+                if not fu.startswith("http"):
+                    continue
+                m = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{20,})', fu)
                 if m:
                     sitekey = m.group(1).strip()
                     break
+            except Exception:
+                pass
 
-        if not sitekey:
-            print(f"   [Captcha] No sitekey found")
-            return True, f"{cap_type}-no-sitekey"
+    if not sitekey:
+        for pat in [
+            r'data-sitekey=["\']([A-Za-z0-9_-]{20,})["\']',
+            r'"sitekey"\s*:\s*"([A-Za-z0-9_-]{20,})"',
+        ]:
+            m = re.search(pat, html, re.I)
+            if m:
+                sitekey = m.group(1).strip()
+                break
 
+    if not sitekey:
+        print(f"   [Captcha] No sitekey found")
+        return True, f"{cap_type}-no-sitekey"
+
+    async with _nopecha_semaphore:
         token = await asyncio.to_thread(_nopecha_token_api, cap_type, sitekey, page_url)
-        if token:
-            await _inject_token(page, str(token), cap_type)
-            print(f"   [Captcha] Solved: {cap_type}")
-            return True, f"{cap_type}-solved-NopeCHA"
-        else:
-            print(f"   [Captcha] Timeout/failed after {NOPECHA_HARD_TIMEOUT}s")
-            return True, f"{cap_type}-timeout-{NOPECHA_HARD_TIMEOUT}s"
+        
+    if token:
+        await _inject_token(page, str(token), cap_type)
+        print(f"   [Captcha] Solved: {cap_type}")
+        return True, f"{cap_type}-solved-NopeCHA"
+    else:
+        print(f"   [Captcha] Timeout/failed after {NOPECHA_HARD_TIMEOUT}s")
+        return True, f"{cap_type}-timeout-{NOPECHA_HARD_TIMEOUT}s"
 
 
 # ============================================================
@@ -1264,7 +1276,7 @@ def _build_gpt_prompt(company_name, pitch, subject, page_text, elements) -> str:
 
     prompt = f"""Fill contact form for {company_name}.
 
-SENDER: Name={MY_FULL_NAME} Email={MY_EMAIL} Phone={MY_PHONE} PhoneIntl={MY_PHONE_INTL} Company={MY_COMPANY} Website={MY_WEBSITE} Subject={subject[:80]} Budget=10000 Country=India
+SENDER: Name={MY_FULL_NAME} Email={MY_EMAIL} Phone={MY_PHONE} PhoneIntl={MY_PHONE_INTL} Company={MY_COMPANY} Website={MY_WEBSITE} Subject={subject[:80]} Budget=10000 Country=India Zip/PostalCode={MY_PIN_CODE}
 
 MESSAGE: {pitch[:200]}
 
@@ -1521,7 +1533,7 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 if (['hidden','submit','button','image','reset','search'].includes(el.type)) return;
                 
                 var nm2 = (el.name || el.id || el.placeholder || '').toLowerCase();
-                if (/\bsearch\b|sf_s|zip.?code|keyword|flexdata/.test(nm2)) return;
+                if (/\bsearch\b|sf_s|keyword|flexdata/.test(nm2)) return;
                 if (nm2 === 'search' || nm2.startsWith('search')) return;
                 var par = el.parentElement; var skip = false;
                 for (var d=0; d<8 && par; d++) {{
@@ -1556,6 +1568,7 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 if (h.includes('subject')||h.includes('topic')) {{ RF(el,`{subject_e}`); return; }}
                 if (h.includes('budget')||h.includes('amount')) {{ RF(el,'10000'); return; }}
                 if (h.includes('country')) {{ RF(el,'India'); return; }}
+                if (h.includes('zip')||h.includes('postal')||h.includes('pin')) {{ RF(el,'{MY_PIN_CODE}'); return; }}
                 if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')) {{ RF(el,`{pitch_e}`); return; }}
                 if (el.type==='text') {{ RF(el,'{MY_FULL_NAME}'); return; }}
             }});
@@ -2356,7 +2369,7 @@ def load_leads(csv_path=None):
                 for row in csv.DictReader(f):
                     # ── Blank company name ya blank URL wali rows skip karo ──
                     company = (row.get("Company Name") or "").strip()
-                    url     = (row.get("Contact URL Found") or row.get("Contact Form URL") or "").strip()
+                    url     = (row.get("Contact URL Found") or row.get("Contact Form URL") or row.get("Contact URL") or "").strip()
                     if not company or not url:
                         print(f"   [CSV] Skipping blank row: {row}")
                         continue
@@ -2451,13 +2464,14 @@ async def main():
                     lead.get("company") or f"Company {lead_index}"
                 )
                 url = (
-    lead.get("Contact URL Found") or      # ← tumhara actual CSV column
-    lead.get("Contact Form URL") or
-    lead.get("Website URL") or
-    lead.get("Website") or
-    lead.get("URL") or
-    lead.get("url") or ""
-).strip()
+                    lead.get("Contact URL Found") or
+                    lead.get("Contact Form URL") or
+                    lead.get("Contact URL") or
+                    lead.get("Website URL") or
+                    lead.get("Website") or
+                    lead.get("URL") or
+                    lead.get("url") or ""
+                ).strip()
                 pitch = subject = None
                 if prefetch_task:
                     try:
