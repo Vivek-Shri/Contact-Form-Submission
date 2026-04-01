@@ -93,7 +93,7 @@ MAX_INPUT_TOKENS  = 5000
 MAX_OUTPUT_TOKENS = 16384  # gpt-5-nano reasoning needs ~3-4k thinking tokens + actual output
 
 # ── NopeCHA hard timeout (seconds) ──────────────────────────
-NOPECHA_HARD_TIMEOUT = 300   # ← was 3600; now 2 minutes then give up
+NOPECHA_HARD_TIMEOUT = 600   # ← was 3600; now 2 minutes then give up
 
 # ── React/Vue fill JS ────────────────────────────────────────
 REACT_FILL_JS = """
