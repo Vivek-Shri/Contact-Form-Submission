@@ -56,10 +56,10 @@ MY_FIRST_NAME    = "Uttam Kumar"
 MY_LAST_NAME     = "Tiwari"
 MY_FULL_NAME     = "Uttam Kumar Tiwari"
 MY_EMAIL         = "info@hyperstaff.co"
-MY_PHONE         = "646-798-9403"
-MY_PHONE_INTL    = "+1646-798-9403"
+MY_PHONE         = "347-997-9083"
+MY_PHONE_INTL    = "+1347-997-9083"
 MY_PIN_CODE      = "110032"
-MY_PHONE_DISPLAY = "+1 (646) 798-9403"
+MY_PHONE_DISPLAY = "+1(347) 997-9083"
 MY_COMPANY       = "HyperStaff"
 MY_WEBSITE       = "https://hyperstaff.co"
 
@@ -90,7 +90,7 @@ TOKEN_LOG_FILE     = "token_usage.csv"
 
 # ── HARD TOKEN LIMITS PER CALL ──────────────────────────────
 MAX_INPUT_TOKENS  = 5000
-MAX_OUTPUT_TOKENS = 500
+MAX_OUTPUT_TOKENS = 16384  # gpt-5-nano reasoning needs ~3-4k thinking tokens + actual output
 
 # ── NopeCHA hard timeout (seconds) ──────────────────────────
 NOPECHA_HARD_TIMEOUT = 300   # ← was 3600; now 2 minutes then give up
@@ -1369,15 +1369,19 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
     try:
         resp = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-4o-mini",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=MAX_OUTPUT_TOKENS,
+            max_completion_tokens=MAX_OUTPUT_TOKENS,
         )
         if resp.usage:
             token_tracker.record(company_name, "form_fill", resp.usage, worker_index)
 
-        raw = resp.choices[0].message.content.strip()
+        raw_content = resp.choices[0].message.content
+        if not raw_content or not raw_content.strip():
+            print(f"   [{company_name[:20]}] [GPT] Empty response (finish={resp.choices[0].finish_reason}) — JS fallback")
+            fb = await _js_fallback_fill(page, company_name, pitch, subject)
+            return fb, {}
+        raw = raw_content.strip()
         m = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw)
         if m:
             raw = m.group(1).strip()
