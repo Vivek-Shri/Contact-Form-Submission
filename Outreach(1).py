@@ -3,6 +3,7 @@ import csv
 import sys
 import random
 import re
+import os
 
 # Force UTF-8 stdout on Windows to avoid 'charmap' codec errors with Unicode chars
 if sys.platform == "win32":
@@ -52,16 +53,16 @@ def _disable_nopecha_key(key):
     with _nopecha_lock:
         _nopecha_key_states[key] = False
 
-MY_FIRST_NAME    = "Uttam Kumar"
-MY_LAST_NAME     = "Tiwari"
-MY_FULL_NAME     = "Uttam Kumar Tiwari"
-MY_EMAIL         = "info@hyperstaff.co"
-MY_PHONE         = "347-997-9083"
-MY_PHONE_INTL    = "+1347-997-9083"
-MY_PIN_CODE      = "110032"
-MY_PHONE_DISPLAY = "+1(347) 997-9083"
-MY_COMPANY       = "HyperStaff"
-MY_WEBSITE       = "https://hyperstaff.co"
+MY_FIRST_NAME    = os.environ.get("MY_FIRST_NAME", "Uttam Kumar")
+MY_LAST_NAME     = os.environ.get("MY_LAST_NAME", "Tiwari")
+MY_FULL_NAME     = os.environ.get("MY_FULL_NAME", "Uttam Kumar Tiwari")
+MY_EMAIL         = os.environ.get("MY_EMAIL", "info@hyperstaff.co")
+MY_PHONE         = os.environ.get("MY_PHONE", "347-997-9083")
+MY_PHONE_INTL    = os.environ.get("MY_PHONE_INTL", "+1347-997-9083")
+MY_PIN_CODE      = os.environ.get("MY_PIN_CODE", "110032")
+MY_PHONE_DISPLAY = os.environ.get("MY_PHONE_DISPLAY", "+1(347) 997-9083")
+MY_COMPANY       = os.environ.get("MY_COMPANY", "HyperStaff")
+MY_WEBSITE       = os.environ.get("MY_WEBSITE", "https://hyperstaff.co")
 
 PARALLEL_COUNT = 10   # 10 workers, one per proxy
 
@@ -93,7 +94,7 @@ MAX_INPUT_TOKENS  = 5000
 MAX_OUTPUT_TOKENS = 16384  # gpt-5-nano reasoning needs ~3-4k thinking tokens + actual output
 
 # ── NopeCHA hard timeout (seconds) ──────────────────────────
-NOPECHA_HARD_TIMEOUT = 600   # ← was 3600; now 2 minutes then give up
+NOPECHA_HARD_TIMEOUT = 600   # ← was 300; now 10 minutes then give up
 
 # ── React/Vue fill JS ────────────────────────────────────────
 REACT_FILL_JS = """
@@ -824,7 +825,13 @@ def _nopecha_token_api(cap_type: str, sitekey: str, url: str) -> str | None:
             if _STOP_FLAG.is_set():
                 print(f"   [NopeCHA] Stop flag set during sleep — aborting")
                 return None
-            _t.sleep(1)
+            try:
+                _t.sleep(1)
+            except OSError as e:
+                # Windows might raise OSError(22, 'Invalid argument') on Sleep()
+                # when interrupted by signal.CTRL_BREAK_EVENT
+                print(f"   [NopeCHA] Sleep interrupted ({e}) — aborting")
+                return None
         
         polls += 1
 
@@ -1004,16 +1011,20 @@ def generate_ai_pitch_and_subject(company_name, worker_index=-1):
 
     subject = f"Virtual Assistant Support for {greeting} — {MY_COMPANY}"
 
-    message = (
-        f"Hi {greeting},\n\n"
-        f"I'm from {MY_COMPANY}, and I'll keep this brief — we provide pre-trained "
-        f"Virtual Assistants who are ready to work in your time zone and take your "
-        f"backend operations completely off your plate.\n\n"
-        f"The result? You get to focus 100% on scaling your business and closing more deals.\n\n"
-        f"We can have the right VA matched and ready for you within 24–48 hours.\n\n"
-        f"Would love to show you how it works — are you open to a quick chat?\n"
-        f"Looking forward to connecting!"
-    )
+    custom_pitch = os.environ.get("PITCH_MESSAGE", "").strip()
+    if custom_pitch:
+        message = custom_pitch.replace("{company_name}", greeting).replace("{MY_COMPANY}", MY_COMPANY)
+    else:
+        message = (
+            f"Hi {greeting},\n\n"
+            f"I'm from {MY_COMPANY}, and I'll keep this brief — we provide pre-trained "
+            f"Virtual Assistants who are ready to work in your time zone and take your "
+            f"backend operations completely off your plate.\n\n"
+            f"The result? You get to focus 100% on scaling your business and closing more deals.\n\n"
+            f"We can have the right VA matched and ready for you within 24–48 hours.\n\n"
+            f"Would love to show you how it works — are you open to a quick chat?\n"
+            f"Looking forward to connecting!"
+        )
 
     return message, subject
 # ============================================================
@@ -2263,6 +2274,12 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             )
             captcha_status = cap_type
         except Exception as e:
+            if _STOP_FLAG.is_set():
+                print("   [Captcha] Stop flag active — skipping error emit")
+                await context.close()
+                await browser.close()
+                return
+
             captcha_status = f"Error:{str(e)[:40]}"
             bw_kb = round(bw["bytes"] / 1024, 1)
             await safe_append_row(sheet, _build_row(
@@ -2344,8 +2361,15 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             await context.close()
             await browser.close()
             return await process_form(pw, company_name, url, sheet, lead_index, total,
+                                      
                                       attempt=2, worker_index=worker_index)
         print(f"   [{company_name[:20]}] FAILED: {e}")
+        if _STOP_FLAG.is_set():
+            print(f"   [{company_name[:20]}] Stop flag active — skipping error emit")
+            await context.close()
+            await browser.close()
+            return
+            
         bw_kb = round(bw["bytes"] / 1024, 1)
         await safe_append_row(sheet, _build_row(
             company_name, url, "No",
