@@ -1,0 +1,163 @@
+@import "tailwindcss/base";
+@import "tailwindcss/components";
+@import "tailwindcss/utilities";
+
+:root {
+  --background: #0a1220;
+  --foreground: #dbe4f3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--foreground);
+  font-family: var(--font-inter), Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI,
+    Roboto, Helvetica, Arial, sans-serif;
+  background:
+    radial-gradient(circle at 8% 12%, rgba(99, 102, 241, 0.11), transparent 34%),
+    radial-gradient(circle at 92% 2%, rgba(147, 197, 253, 0.08), transparent 30%),
+    radial-gradient(circle at 60% 120%, rgba(16, 185, 129, 0.06), transparent 46%),
+    linear-gradient(180deg, #0a1220 0%, #08101d 100%);
+}
+
+.nebula-shell {
+  position: relative;
+}
+
+.nebula-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 40px 40px;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(15, 23, 42, 0.9), transparent 80%);
+  mask-image: linear-gradient(to bottom, rgba(15, 23, 42, 0.9), transparent 80%);
+}
+
+.glass-panel {
+  position: relative;
+  z-index: 1;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.48), rgba(15, 23, 42, 0.3));
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 10px 24px rgba(2, 6, 23, 0.3);
+}
+
+.sidebar-float {
+  border-radius: 1.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.66), rgba(15, 23, 42, 0.48)),
+    radial-gradient(circle at 0% 0%, rgba(99, 102, 241, 0.1), transparent 34%);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 12px 30px rgba(2, 6, 23, 0.36);
+}
+
+.progress-track {
+  appearance: none;
+  border: none;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.75);
+  overflow: hidden;
+}
+
+.progress-track::-webkit-progress-bar {
+  background: rgba(15, 23, 42, 0.75);
+  border-radius: 9999px;
+}
+
+.progress-track::-webkit-progress-value {
+  border-radius: 9999px;
+}
+
+.progress-track::-moz-progress-bar {
+  border-radius: 9999px;
+}
+
+.progress-scraper::-webkit-progress-value {
+  background: linear-gradient(90deg, rgba(129, 140, 248, 0.95), rgba(96, 165, 250, 0.95));
+}
+
+.progress-scraper::-moz-progress-bar {
+  background: linear-gradient(90deg, rgba(129, 140, 248, 0.95), rgba(96, 165, 250, 0.95));
+}
+
+.progress-runner::-webkit-progress-value {
+  background: linear-gradient(90deg, rgba(96, 165, 250, 0.95), rgba(20, 184, 166, 0.95));
+}
+
+.progress-runner::-moz-progress-bar {
+  background: linear-gradient(90deg, rgba(96, 165, 250, 0.95), rgba(20, 184, 166, 0.95));
+}
+
+.terminal-shell {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background:
+    radial-gradient(circle at 80% -20%, rgba(56, 189, 248, 0.05), transparent 36%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.66), rgba(2, 6, 23, 0.86));
+}
+
+.form-input {
+  width: 100%;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.4);
+  padding: 0.62rem 0.85rem;
+  color: #dce7f8;
+  outline: none;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.form-input::placeholder {
+  color: #7b8aa0;
+}
+
+.form-input:focus {
+  border-color: rgba(96, 165, 250, 0.52);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.24);
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.breathing-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #10b981;
+  box-shadow: 0 0 0 rgba(16, 185, 129, 0.28);
+  animation: breathing 1.8s ease-in-out infinite;
+}
+
+@keyframes breathing {
+  0% {
+    opacity: 0.58;
+    transform: scale(0.85);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.24);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+  }
+
+  100% {
+    opacity: 0.58;
+    transform: scale(0.85);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
