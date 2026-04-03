@@ -4,6 +4,7 @@ import sys
 import random
 import re
 import os
+import signal
 
 # Force UTF-8 stdout on Windows to avoid 'charmap' codec errors with Unicode chars
 if sys.platform == "win32":
@@ -56,14 +57,15 @@ def _disable_nopecha_key(key):
 MY_FIRST_NAME    = os.environ.get("MY_FIRST_NAME", "Uttam Kumar")
 MY_LAST_NAME     = os.environ.get("MY_LAST_NAME", "Tiwari")
 MY_FULL_NAME     = os.environ.get("MY_FULL_NAME", "Uttam Kumar Tiwari")
-MY_EMAIL         = os.environ.get("MY_EMAIL", "info@hyperstaff.co")
+MY_EMAIL         = os.environ.get("MY_EMAIL", "uttam.tiwari@mail.hyperstaff.co")
 MY_PHONE         = os.environ.get("MY_PHONE", "347-997-9083")
 MY_PHONE_INTL    = os.environ.get("MY_PHONE_INTL", "+1347-997-9083")
 MY_PIN_CODE      = os.environ.get("MY_PIN_CODE", "110032")
 MY_PHONE_DISPLAY = os.environ.get("MY_PHONE_DISPLAY", "+1(347) 997-9083")
 MY_COMPANY       = os.environ.get("MY_COMPANY", "HyperStaff")
 MY_WEBSITE       = os.environ.get("MY_WEBSITE", "https://hyperstaff.co")
-
+MY_ADDRESS       = os.environ.get("MY_ADDRESS", "NEW DELHI, INDIA")
+MY_TITLE         = os.environ.get("MY_TITLE", "Virtual Assistant Support for {company_name} — {MY_COMPANY}")
 PARALLEL_COUNT = 10   # 10 workers, one per proxy
 
 # ── Narrow viewport: isolates form sections like the RXR screenshot ──
@@ -94,7 +96,7 @@ MAX_INPUT_TOKENS  = 5000
 MAX_OUTPUT_TOKENS = 16384  # gpt-5-nano reasoning needs ~3-4k thinking tokens + actual output
 
 # ── NopeCHA hard timeout (seconds) ──────────────────────────
-NOPECHA_HARD_TIMEOUT = 600   # ← was 300; now 10 minutes then give up
+NOPECHA_HARD_TIMEOUT = 900   # ← was 300; now 15 minutes then give up
 
 # ── React/Vue fill JS ────────────────────────────────────────
 REACT_FILL_JS = """
@@ -134,6 +136,9 @@ EXTRACT_FIELDS_JS = """
         var type = (el.type || '').toLowerCase();
         if (['hidden', 'submit', 'button', 'image', 'reset', 'file', 'search'].includes(type)) return;
 
+        var id = el.id || '';
+        var name = el.name || '';
+
         // Skip search bars by name/id/placeholder
         var nm = (el.name || el.id || el.placeholder || '').toLowerCase();
         if (/\bsearch\b|sf_s|zip.?code|keyword|flexdata/.test(nm)) return;
@@ -162,8 +167,6 @@ EXTRACT_FIELDS_JS = """
         var rect = el.getBoundingClientRect();
         if (depth === 0 && rect.width === 0 && rect.height === 0) return;
 
-        var id = el.id || '';
-        var name = el.name || '';
         var key = tag + '|' + id + '|' + name + '|' + Math.round(rect.y);
         if (seen.has(key)) return;
         seen.add(key);
@@ -404,6 +407,21 @@ token_tracker = TokenTracker()
 _STOP_FLAG = threading.Event()
 
 
+def _handle_stop_signal(sig_num, _frame):
+    if _STOP_FLAG.is_set():
+        return
+    print(f"\n[Signal] Received {sig_num} - stopping workers...")
+    _STOP_FLAG.set()
+
+
+for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+    if hasattr(signal, _sig_name):
+        try:
+            signal.signal(getattr(signal, _sig_name), _handle_stop_signal)
+        except Exception:
+            pass
+
+
 # ============================================================
 #   10 PROXIES — each worker gets a dedicated proxy
 #   Workers are assigned by index: worker_index % 10
@@ -531,7 +549,11 @@ def _build_row(company_name, url, submitted, assurance,
         fields_str = " | ".join(parts[:15])  # up to 15 fields shown
     else:
         fields_str = "—"
-    msg_str = str(message_sent) if message_sent else "—"
+    if message_sent:
+        msg_compact = re.sub(r"\s+", " ", str(message_sent)).strip()
+        msg_str = (msg_compact[:500] + "...") if len(msg_compact) > 500 else msg_compact
+    else:
+        msg_str = "—"
     return base + tok + [fields_str, str(sub_status or "—"), str(confirmation_msg or "—")[:300], msg_str]
 
 
@@ -927,6 +949,13 @@ async def detect_and_solve_captcha(page, iframe=None):
         re.search(r'grecaptcha\.render\s*\(', html, re.I)
     )
     has_turnstile = bool(re.search(r'cf-turnstile|challenges\.cloudflare\.com/turnstile', html, re.I))
+    is_cloudflare_interstitial = bool(
+        re.search(r'__cf_chl|cdn-cgi/challenge-platform|Just a moment\.\.\.|Enable JavaScript and cookies to continue', html, re.I)
+    )
+
+    if is_cloudflare_interstitial:
+        print("   [Captcha] Cloudflare interstitial/challenge page detected")
+        return True, "cloudflare-challenge-page"
 
     if not (has_hcaptcha or has_recaptcha or has_turnstile):
         print("   [Captcha] None detected")
@@ -943,6 +972,16 @@ async def detect_and_solve_captcha(page, iframe=None):
 
     print(f"   [Captcha] Detected: {cap_type}")
 
+    def _clean_sitekey(raw):
+        if not raw:
+            return None
+        value = str(raw).strip().strip('"\'')
+        if len(value) < 8 or len(value) > 200:
+            return None
+        if re.search(r'\s', value):
+            return None
+        return value
+
     sitekey = None
     for sel in ["[data-sitekey]",".g-recaptcha",".h-captcha","[class*='cf-turnstile']"]:
         try:
@@ -950,11 +989,72 @@ async def detect_and_solve_captcha(page, iframe=None):
             if await el.count() > 0:
                 for attr in ["data-sitekey","data-hcaptcha-sitekey","data-recaptcha-sitekey"]:
                     sk = await el.get_attribute(attr)
-                    if sk and len(sk) > 10:
-                        sitekey = sk.strip()
+                    cleaned = _clean_sitekey(sk)
+                    if cleaned:
+                        sitekey = cleaned
                         break
             if sitekey:
                 break
+        except Exception:
+            pass
+
+    if not sitekey:
+        try:
+            sitekey = await page.evaluate("""() => {
+                try {
+                    return (
+                        (window.__hcaptchaSitekey && String(window.__hcaptchaSitekey)) ||
+                        (window.hcaptchaSitekey && String(window.hcaptchaSitekey)) ||
+                        (window.__turnstileSitekey && String(window.__turnstileSitekey)) ||
+                        (window.turnstileSitekey && String(window.turnstileSitekey)) ||
+                        null
+                    );
+                } catch (e) {
+                    return null;
+                }
+            }""")
+            sitekey = _clean_sitekey(sitekey)
+        except Exception:
+            pass
+
+    if not sitekey:
+        try:
+            sitekey = await page.evaluate("""() => {
+                const parseSitekeyFromUrl = (src) => {
+                    if (!src || typeof src !== 'string') return null;
+                    const m = src.match(/[?&](?:sitekey|k)=([^&#]+)/i);
+                    if (!m || !m[1]) return null;
+                    try {
+                        return decodeURIComponent(m[1]);
+                    } catch {
+                        return m[1];
+                    }
+                };
+
+                const attrs = ['data-sitekey', 'data-hcaptcha-sitekey', 'data-recaptcha-sitekey'];
+                for (const attr of attrs) {
+                    const node = document.querySelector(`[${attr}]`);
+                    if (node) {
+                        const v = (node.getAttribute(attr) || '').trim();
+                        if (v) return v;
+                    }
+                }
+
+                for (const frame of Array.from(document.querySelectorAll('iframe[src]'))) {
+                    const src = frame.getAttribute('src') || '';
+                    const k = parseSitekeyFromUrl(src);
+                    if (k) return k;
+                }
+
+                for (const script of Array.from(document.querySelectorAll('script[src]'))) {
+                    const src = script.getAttribute('src') || '';
+                    const k = parseSitekeyFromUrl(src);
+                    if (k) return k;
+                }
+
+                return null;
+            }""")
+            sitekey = _clean_sitekey(sitekey)
         except Exception:
             pass
 
@@ -964,21 +1064,23 @@ async def detect_and_solve_captcha(page, iframe=None):
                 fu = frame.url or ""
                 if not fu.startswith("http"):
                     continue
-                m = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{20,})', fu)
+                m = re.search(r'[?&](?:sitekey|k)=([^&#]+)', fu, re.I)
                 if m:
-                    sitekey = m.group(1).strip()
+                    sitekey = _clean_sitekey(m.group(1))
                     break
             except Exception:
                 pass
 
     if not sitekey:
         for pat in [
-            r'data-sitekey=["\']([A-Za-z0-9_-]{20,})["\']',
-            r'"sitekey"\s*:\s*"([A-Za-z0-9_-]{20,})"',
+            r'(?:sitekey|"sitekey"|\'sitekey\')\s*[:=]\s*["\']([^"\']{8,200})["\']',
+            r'data-sitekey=["\']([^"\']{8,200})["\']',
+            r'"sitekey"\s*:\s*"([^"\']{8,200})"',
+            r'hcaptcha\.render\([^)]*sitekey\s*:\s*["\']([^"\']{8,200})["\']',
         ]:
             m = re.search(pat, html, re.I)
             if m:
-                sitekey = m.group(1).strip()
+                sitekey = _clean_sitekey(m.group(1))
                 break
 
     if not sitekey:
@@ -1009,7 +1111,10 @@ def generate_ai_pitch_and_subject(company_name, worker_index=-1):
     # Use company_name as the greeting; it could be a person name or company name
     greeting = company_name if company_name else "there"
 
-    subject = f"Virtual Assistant Support for {greeting} — {MY_COMPANY}"
+    if MY_TITLE:
+        subject = MY_TITLE.replace("{company_name}", greeting).replace("{MY_COMPANY}", MY_COMPANY)
+    else:
+        subject = f"Virtual Assistant Support for {greeting} — {MY_COMPANY}"
 
     custom_pitch = os.environ.get("PITCH_MESSAGE", "").strip()
     if custom_pitch:
@@ -1470,9 +1575,14 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
 
             elif action == "select":
                 filled = False
+                selected_text = value
+
+                # Try strict label/value first.
                 for method in [
                     lambda: el.select_option(label=value),
                     lambda: el.select_option(value=value),
+                    lambda: el.select_option(label=value.strip()),
+                    lambda: el.select_option(value=value.strip()),
                 ]:
                     try:
                         await method()
@@ -1480,19 +1590,85 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
                         break
                     except Exception:
                         pass
+
+                # If strict methods fail, pick best matching non-placeholder option.
                 if not filled:
                     try:
-                        for opt in await el.locator("option").all():
-                            t = (await opt.inner_text()).strip()
-                            if t and not re.match(r'^(--|choose|select|please)', t, re.I):
-                                await el.select_option(label=t)
-                                filled = True
-                                break
+                        choice = await el.evaluate("""(selectEl, desiredRaw) => {
+                            const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                            const desired = norm(desiredRaw);
+                            const desiredTokens = desired.split(' ').filter(Boolean);
+                            const opts = Array.from(selectEl.options || []).map(o => ({
+                                value: String(o.value || ''),
+                                label: String((o.textContent || '').trim()),
+                            }));
+
+                            const isPlaceholder = (o) => {
+                                const t = norm(o.label);
+                                if (!t) return true;
+                                if (!o.value || !String(o.value).trim()) return true;
+                                if (/^(--+|select|choose|please select|choose one|default|none|n\\/a|na)$/.test(t)) return true;
+                                if (t.startsWith('select ') || t.startsWith('choose ')) return true;
+                                return false;
+                            };
+
+                            const usable = opts.filter(o => !isPlaceholder(o));
+                            if (!usable.length) return null;
+
+                            if (!desired) {
+                                return usable[0];
+                            }
+
+                            for (const o of usable) {
+                                if (norm(o.label) === desired || norm(o.value) === desired) return o;
+                            }
+
+                            for (const o of usable) {
+                                const l = norm(o.label);
+                                const v = norm(o.value);
+                                if (l.includes(desired) || desired.includes(l) || v.includes(desired) || desired.includes(v)) {
+                                    return o;
+                                }
+                            }
+
+                            let best = null;
+                            let bestScore = -1;
+                            for (const o of usable) {
+                                const lt = norm(o.label).split(' ').filter(Boolean);
+                                const vt = norm(o.value).split(' ').filter(Boolean);
+                                let score = 0;
+                                for (const t of desiredTokens) {
+                                    if (lt.includes(t) || vt.includes(t)) score += 1;
+                                }
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    best = o;
+                                }
+                            }
+
+                            return best || usable[0];
+                        }""", value)
+
+                        if choice and str(choice.get("value", "")).strip():
+                            await el.select_option(value=str(choice["value"]))
+                            selected_text = str(choice.get("label") or value)
+                            filled = True
                     except Exception:
                         pass
+
                 if filled:
-                    print(f"   [{company_name[:20]}] + select {selector[:35]} = {value[:25]}")
-                    filled_values[selector] = value 
+                    try:
+                        await el.evaluate("""(selectEl) => {
+                            ['input','change','blur'].forEach(evt =>
+                                selectEl.dispatchEvent(new Event(evt, { bubbles: true }))
+                            );
+                        }""")
+                    except Exception:
+                        pass
+
+                if filled:
+                    print(f"   [{company_name[:20]}] + select {selector[:35]} = {selected_text[:25]}")
+                    filled_values[selector] = selected_text
                     total_filled += 1
 
             elif action == "check":
@@ -1596,6 +1772,54 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
         return 0
 
 
+async def ensure_required_dropdowns(page, target, company_name="") -> int:
+    """
+    Some forms fail with messages like "Dropdown cannot be blank" even after text fields are filled.
+    This pass ensures required native <select> fields have a non-placeholder value.
+    """
+    fixed = 0
+    sources = [target]
+    if target != page:
+        sources.append(page)
+
+    for src in sources:
+        try:
+            changed = await src.evaluate("""() => {
+                const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                const isPlaceholder = (label, value) => {
+                    const t = norm(label);
+                    if (!t) return true;
+                    if (!String(value || '').trim()) return true;
+                    if (/^(--+|select|choose|please select|choose one|default|none|n\\/a|na)$/.test(t)) return true;
+                    if (t.startsWith('select ') || t.startsWith('choose ')) return true;
+                    return false;
+                };
+
+                let n = 0;
+                document.querySelectorAll('select[required], select[aria-required="true"]').forEach(el => {
+                    const selectedOpt = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+                    const selectedText = selectedOpt ? (selectedOpt.textContent || '').trim() : '';
+                    const selectedValue = selectedOpt ? selectedOpt.value : (el.value || '');
+                    if (!isPlaceholder(selectedText, selectedValue)) return;
+
+                    const candidate = Array.from(el.options || []).find(o => !isPlaceholder((o.textContent || '').trim(), o.value));
+                    if (!candidate) return;
+
+                    el.value = candidate.value;
+                    ['input', 'change', 'blur'].forEach(evt => el.dispatchEvent(new Event(evt, { bubbles: true })));
+                    n += 1;
+                });
+                return n;
+            }""")
+            fixed += int(changed or 0)
+        except Exception:
+            continue
+
+    if fixed > 0:
+        print(f"   [{company_name[:20]}] [DropdownFix] Auto-selected {fixed} required dropdown(s)")
+    return fixed
+
+
 # ============================================================
 #   CHECKBOXES
 # ============================================================
@@ -1681,6 +1905,11 @@ async def click_submit(target, page, company_name=""):
         "form button[type='submit']",
         "button[type='submit']",
         "input[type='submit']",
+        "input[type='image']",
+        "[role='button'][aria-label*='submit' i]",
+        "[role='button'][aria-label*='send' i]",
+        "[role='button'][class*='submit' i]",
+        "[role='button'][class*='send' i]",
         ".hs-button",
         "[class*='btn-submit' i]",
         ".elementor-button[type='submit']",
@@ -1828,6 +2057,66 @@ async def click_submit(target, page, company_name=""):
         print(f"   {tag} [Submit] ✓ Last resort: {last_resort}")
         return True, f"last-resort:{last_resort}"
 
+    # ── Strategy F: direct form submit API fallback ─────────
+    direct_submit = await page.evaluate("""() => {
+        const forms = Array.from(document.querySelectorAll('form'));
+        const scoreForm = (form) => {
+            const action = (form.action || '').toLowerCase();
+            const cls = (form.className || '').toLowerCase();
+            const fid = (form.id || '').toLowerCase();
+            if (action.includes('search') || cls.includes('search') || fid.includes('search')) {
+                return { usable: false, filled: 0, total: 0 };
+            }
+
+            const fields = Array.from(form.querySelectorAll('input, textarea, select')).filter((el) => {
+                const type = String(el.type || '').toLowerCase();
+                if (['hidden', 'submit', 'button', 'reset', 'image', 'file', 'search'].includes(type)) return false;
+                const rc = el.getBoundingClientRect();
+                return rc.width > 0 && rc.height > 0;
+            });
+
+            let filled = 0;
+            for (const el of fields) {
+                const val = String(el.value || '').trim();
+                if (val) filled += 1;
+            }
+
+            return { usable: fields.length > 0, filled, total: fields.length };
+        };
+
+        const ranked = forms
+            .map((form) => ({ form, score: scoreForm(form) }))
+            .filter((item) => item.score.usable && item.score.filled > 0)
+            .sort((a, b) => {
+                if (b.score.filled !== a.score.filled) return b.score.filled - a.score.filled;
+                return b.score.total - a.score.total;
+            });
+
+        for (const item of ranked) {
+            const form = item.form;
+            try {
+                if (typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    return `requestSubmit(${item.score.filled}/${item.score.total})`;
+                }
+            } catch (e) {}
+
+            try {
+                const evt = new Event('submit', { bubbles: true, cancelable: true });
+                form.dispatchEvent(evt);
+                if (typeof form.submit === 'function') {
+                    form.submit();
+                }
+                return `form.submit(${item.score.filled}/${item.score.total})`;
+            } catch (e) {}
+        }
+
+        return null;
+    }""")
+    if direct_submit:
+        print(f"   {tag} [Submit] ✓ Direct submit: {direct_submit}")
+        return True, f"direct-submit:{direct_submit}"
+
     print(f"   {tag} [Submit] ✗ NO submit button found anywhere on page")
     return False, "not_found"
 
@@ -1842,6 +2131,10 @@ SUCCESS_KEYWORDS = [
     "message sent","message received","form submitted",
     "inquiry received","we have received","sent successfully",
     "confirmation","we'll be in touch","shortly",
+    "thank you for contacting us","thank you for your inquiry",
+    "we will contact you","we'll contact you",
+    "your message has been sent","your request has been received",
+    "form submitted successfully",
 ]
 THANKYOU_URL_FRAGS = [
     "thank","thanks","success","confirmed","submitted","sent","done","received",
@@ -1898,6 +2191,8 @@ async def get_confirmation(page, target=None, original_url="", company_name="", 
                 "[class*='success' i]", "[class*='thank' i]", "[class*='confirm' i]",
                 ".alert-success", ".form-success", "[role='alert']",
                 ".submitted-message", ".gform_confirmation_message",
+                ".hs-form__success-message", "[data-form-success]", "[data-success]",
+                "[aria-live='polite']", "[aria-live='assertive']",
             ]:
                 try:
                     els = src.locator(sel)
@@ -1914,6 +2209,29 @@ async def get_confirmation(page, target=None, original_url="", company_name="", 
                                 return "Yes", msg
                             elif text:
                                 print(f"   {tag} [Confirm] DOM sel='{sel}' (ignored len={len(text)}): '{text[:60]}'")
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+        # ── Validation/error message check (helpful debug signal) ──
+        for src in [s for s in [target, page] if s]:
+            for esel in [
+                ".wpcf7-validation-errors", ".wpcf7-not-valid-tip",
+                "[class*='error' i]", "[class*='invalid' i]", "[aria-invalid='true']",
+                ".gfield_validation_message", ".hs-error-msg", ".hs-error-msgs",
+            ]:
+                try:
+                    errs = src.locator(esel)
+                    for i in range(min(await errs.count(), 5)):
+                        err = errs.nth(i)
+                        try:
+                            if not await err.is_visible():
+                                continue
+                            text = (await err.inner_text()).strip()
+                            if 4 <= len(text) <= 240:
+                                print(f"   {tag} [Confirm] ✗ Validation sel='{esel}' text='{text[:120]}'")
+                                return "No", f"Validation error: {text[:180]}"
                         except Exception:
                             continue
                 except Exception:
@@ -2095,6 +2413,10 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                        attempt=1, _pitch=None, _subject=None, worker_index=0):
     local_tokens = {"input": 0, "output": 0, "calls": 0}
 
+    if _STOP_FLAG.is_set():
+        print(f"   [{company_name[:20]}] Stop flag set - skipping lead")
+        return
+
     lead_snapshot = token_tracker.get_snapshot(worker_index)  # ← LINE 1
 
     if _pitch and _subject:
@@ -2166,6 +2488,93 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         window.confirm = function() { return true; };
         window.prompt = function() { return ''; };
     """)
+    await page.add_init_script("""
+        (() => {
+            function captureFromIframes() {
+                try {
+                    const frames = document.querySelectorAll('iframe[src]');
+                    for (const frame of frames) {
+                        const src = frame.getAttribute('src') || '';
+                        const match = src.match(/[?&](?:sitekey|k)=([^&#]+)/i);
+                        if (!match || !match[1]) continue;
+                        const sk = decodeURIComponent(match[1]);
+                        if (sk) {
+                            if (!window.__hcaptchaSitekey) window.__hcaptchaSitekey = sk;
+                            if (!window.__turnstileSitekey) window.__turnstileSitekey = sk;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            function wrapTurnstile() {
+                try {
+                    if (!window.turnstile || window.turnstile.__captured) return;
+                    const originalRender = window.turnstile.render;
+                    window.turnstile.render = function(container, opts) {
+                        try {
+                            const sk = opts && opts.sitekey ? String(opts.sitekey) : null;
+                            if (sk) {
+                                window.__turnstileSitekey = sk;
+                                window.turnstileSitekey = sk;
+                            }
+                        } catch (e) {}
+                        return originalRender.apply(this, arguments);
+                    };
+                    window.turnstile.__captured = true;
+                } catch (e) {}
+            }
+
+            function wrapHCaptcha() {
+                try {
+                    if (!window.hcaptcha || window.hcaptcha.__captured) return;
+                    const originalRender = window.hcaptcha.render;
+                    window.hcaptcha.render = function(container, opts) {
+                        try {
+                            const sk = opts && opts.sitekey ? String(opts.sitekey) : null;
+                            if (sk) {
+                                window.__hcaptchaSitekey = sk;
+                                window.hcaptchaSitekey = sk;
+                            }
+                        } catch (e) {}
+                        return originalRender.apply(this, arguments);
+                    };
+                    window.hcaptcha.__captured = true;
+                } catch (e) {}
+            }
+
+            try {
+                Object.defineProperty(window, 'turnstile', {
+                    configurable: true,
+                    set(v) {
+                        this.__ts_internal = v;
+                        try { wrapTurnstile(); } catch (e) {}
+                    },
+                    get() {
+                        return this.__ts_internal;
+                    }
+                });
+            } catch (e) {}
+
+            try {
+                Object.defineProperty(window, 'hcaptcha', {
+                    configurable: true,
+                    set(v) {
+                        this.__hc_internal = v;
+                        try { wrapHCaptcha(); } catch (e) {}
+                    },
+                    get() {
+                        return this.__hc_internal;
+                    }
+                });
+            } catch (e) {}
+
+            setInterval(() => {
+                wrapTurnstile();
+                wrapHCaptcha();
+                captureFromIframes();
+            }, 250);
+        })();
+    """)
     await page.route("**/*", _make_route_handler(main_host, bw))
     page.on("response", _make_response_counter(bw))
 
@@ -2208,6 +2617,14 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             print(f"   [{company_name[:20]}] Form finder returned fallback - trying GPT fill anyway...")
 
         filled, form_data = await gpt_fill_form(page, target, company_name, pitch, subject, worker_index) 
+
+        # Some sites keep required dropdowns empty despite successful text fills.
+        dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
+        if dropdown_fixed > 0:
+            filled += dropdown_fixed
+            if isinstance(form_data, dict):
+                form_data["_required_dropdowns"] = f"auto:{dropdown_fixed}"
+
         print(f"   [{company_name[:20]}] Fields filled: {filled}")
 
         if filled == 0:
@@ -2294,7 +2711,11 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             return
 
         # ── Captcha timeout/failed → skip submit, mark No ────
-        if "timeout" in captcha_status or "no-sitekey" in captcha_status:
+        if (
+            "timeout" in captcha_status
+            or "no-sitekey" in captcha_status
+            or "cloudflare-challenge-page" in captcha_status
+        ):
             bw_kb = round(bw["bytes"] / 1024, 1)
             await safe_append_row(sheet, _build_row(
                 company_name, url, "No",
@@ -2396,8 +2817,8 @@ def load_leads(csv_path=None):
             with open(csv_path, mode="r", encoding="utf-8-sig") as f:
                 for row in csv.DictReader(f):
                     # ── Blank company name ya blank URL wali rows skip karo ──
-                    company = (row.get("Company Name") or "").strip()
-                    url     = (row.get("Contact URL Found") or row.get("Contact Form URL") or row.get("Contact URL") or "").strip()
+                    company = (row.get("Company Name") or row.get("company_name") or row.get("company") or row.get("name") or "").strip()
+                    url     = (row.get("Contact URL Found") or row.get("Contact Form URL") or row.get("Contact URL") or row.get("Contact Page URL") or row.get("Contact Page") or row.get("URL") or row.get("url") or row.get("Website") or "").strip()
                     if not company or not url:
                         print(f"   [CSV] Skipping blank row: {row}")
                         continue
@@ -2481,6 +2902,11 @@ async def main():
             """Each worker has a fixed index -> fixed proxy slot."""
             prefetch_task = None
             while True:
+                if _STOP_FLAG.is_set():
+                    if prefetch_task:
+                        prefetch_task.cancel()
+                    break
+
                 try:
                     lead_index, lead = queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -2495,6 +2921,8 @@ async def main():
                     lead.get("Contact URL Found") or
                     lead.get("Contact Form URL") or
                     lead.get("Contact URL") or
+                    lead.get("Contact Page URL") or
+                    lead.get("Contact Page") or
                     lead.get("Website URL") or
                     lead.get("Website") or
                     lead.get("URL") or
@@ -2528,6 +2956,9 @@ async def main():
                                    _pitch=pitch, _subject=subject,
                                    worker_index=worker_index)
                 queue.task_done()
+                if _STOP_FLAG.is_set():
+                    print(f"[Worker#{worker_index}] Stop flag detected - halting queue processing")
+                    break
                 print(f"[Worker#{worker_index}] Done [{lead_index}/{total}] | {queue.qsize()} left")
 
         # Spawn workers with explicit indices 0-9
