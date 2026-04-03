@@ -4,7 +4,6 @@ import sys
 import random
 import re
 import os
-import signal
 
 # Force UTF-8 stdout on Windows to avoid 'charmap' codec errors with Unicode chars
 if sys.platform == "win32":
@@ -405,21 +404,6 @@ class TokenTracker:
 
 token_tracker = TokenTracker()
 _STOP_FLAG = threading.Event()
-
-
-def _handle_stop_signal(sig_num, _frame):
-    if _STOP_FLAG.is_set():
-        return
-    print(f"\n[Signal] Received {sig_num} - stopping workers...")
-    _STOP_FLAG.set()
-
-
-for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
-    if hasattr(signal, _sig_name):
-        try:
-            signal.signal(getattr(signal, _sig_name), _handle_stop_signal)
-        except Exception:
-            pass
 
 
 # ============================================================
@@ -972,16 +956,6 @@ async def detect_and_solve_captcha(page, iframe=None):
 
     print(f"   [Captcha] Detected: {cap_type}")
 
-    def _clean_sitekey(raw):
-        if not raw:
-            return None
-        value = str(raw).strip().strip('"\'')
-        if len(value) < 8 or len(value) > 200:
-            return None
-        if re.search(r'\s', value):
-            return None
-        return value
-
     sitekey = None
     for sel in ["[data-sitekey]",".g-recaptcha",".h-captcha","[class*='cf-turnstile']"]:
         try:
@@ -989,9 +963,8 @@ async def detect_and_solve_captcha(page, iframe=None):
             if await el.count() > 0:
                 for attr in ["data-sitekey","data-hcaptcha-sitekey","data-recaptcha-sitekey"]:
                     sk = await el.get_attribute(attr)
-                    cleaned = _clean_sitekey(sk)
-                    if cleaned:
-                        sitekey = cleaned
+                    if sk and len(sk) > 10:
+                        sitekey = sk.strip()
                         break
             if sitekey:
                 break
@@ -1003,8 +976,6 @@ async def detect_and_solve_captcha(page, iframe=None):
             sitekey = await page.evaluate("""() => {
                 try {
                     return (
-                        (window.__hcaptchaSitekey && String(window.__hcaptchaSitekey)) ||
-                        (window.hcaptchaSitekey && String(window.hcaptchaSitekey)) ||
                         (window.__turnstileSitekey && String(window.__turnstileSitekey)) ||
                         (window.turnstileSitekey && String(window.turnstileSitekey)) ||
                         null
@@ -1013,48 +984,8 @@ async def detect_and_solve_captcha(page, iframe=None):
                     return null;
                 }
             }""")
-            sitekey = _clean_sitekey(sitekey)
-        except Exception:
-            pass
-
-    if not sitekey:
-        try:
-            sitekey = await page.evaluate("""() => {
-                const parseSitekeyFromUrl = (src) => {
-                    if (!src || typeof src !== 'string') return null;
-                    const m = src.match(/[?&](?:sitekey|k)=([^&#]+)/i);
-                    if (!m || !m[1]) return null;
-                    try {
-                        return decodeURIComponent(m[1]);
-                    } catch {
-                        return m[1];
-                    }
-                };
-
-                const attrs = ['data-sitekey', 'data-hcaptcha-sitekey', 'data-recaptcha-sitekey'];
-                for (const attr of attrs) {
-                    const node = document.querySelector(`[${attr}]`);
-                    if (node) {
-                        const v = (node.getAttribute(attr) || '').trim();
-                        if (v) return v;
-                    }
-                }
-
-                for (const frame of Array.from(document.querySelectorAll('iframe[src]'))) {
-                    const src = frame.getAttribute('src') || '';
-                    const k = parseSitekeyFromUrl(src);
-                    if (k) return k;
-                }
-
-                for (const script of Array.from(document.querySelectorAll('script[src]'))) {
-                    const src = script.getAttribute('src') || '';
-                    const k = parseSitekeyFromUrl(src);
-                    if (k) return k;
-                }
-
-                return null;
-            }""")
-            sitekey = _clean_sitekey(sitekey)
+            if sitekey:
+                sitekey = str(sitekey).strip()
         except Exception:
             pass
 
@@ -1064,23 +995,22 @@ async def detect_and_solve_captcha(page, iframe=None):
                 fu = frame.url or ""
                 if not fu.startswith("http"):
                     continue
-                m = re.search(r'[?&](?:sitekey|k)=([^&#]+)', fu, re.I)
+                m = re.search(r'[?&](?:sitekey|k)=([A-Za-z0-9_-]{20,})', fu)
                 if m:
-                    sitekey = _clean_sitekey(m.group(1))
+                    sitekey = m.group(1).strip()
                     break
             except Exception:
                 pass
 
     if not sitekey:
         for pat in [
-            r'(?:sitekey|"sitekey"|\'sitekey\')\s*[:=]\s*["\']([^"\']{8,200})["\']',
-            r'data-sitekey=["\']([^"\']{8,200})["\']',
-            r'"sitekey"\s*:\s*"([^"\']{8,200})"',
-            r'hcaptcha\.render\([^)]*sitekey\s*:\s*["\']([^"\']{8,200})["\']',
+            r'(?:sitekey|"sitekey"|\'sitekey\')\s*[:=]\s*["\']([A-Za-z0-9_-]{10,})["\']',
+            r'data-sitekey=["\']([A-Za-z0-9_-]{20,})["\']',
+            r'"sitekey"\s*:\s*"([A-Za-z0-9_-]{20,})"',
         ]:
             m = re.search(pat, html, re.I)
             if m:
-                sitekey = _clean_sitekey(m.group(1))
+                sitekey = m.group(1).strip()
                 break
 
     if not sitekey:
@@ -1905,11 +1835,6 @@ async def click_submit(target, page, company_name=""):
         "form button[type='submit']",
         "button[type='submit']",
         "input[type='submit']",
-        "input[type='image']",
-        "[role='button'][aria-label*='submit' i]",
-        "[role='button'][aria-label*='send' i]",
-        "[role='button'][class*='submit' i]",
-        "[role='button'][class*='send' i]",
         ".hs-button",
         "[class*='btn-submit' i]",
         ".elementor-button[type='submit']",
@@ -2057,66 +1982,6 @@ async def click_submit(target, page, company_name=""):
         print(f"   {tag} [Submit] ✓ Last resort: {last_resort}")
         return True, f"last-resort:{last_resort}"
 
-    # ── Strategy F: direct form submit API fallback ─────────
-    direct_submit = await page.evaluate("""() => {
-        const forms = Array.from(document.querySelectorAll('form'));
-        const scoreForm = (form) => {
-            const action = (form.action || '').toLowerCase();
-            const cls = (form.className || '').toLowerCase();
-            const fid = (form.id || '').toLowerCase();
-            if (action.includes('search') || cls.includes('search') || fid.includes('search')) {
-                return { usable: false, filled: 0, total: 0 };
-            }
-
-            const fields = Array.from(form.querySelectorAll('input, textarea, select')).filter((el) => {
-                const type = String(el.type || '').toLowerCase();
-                if (['hidden', 'submit', 'button', 'reset', 'image', 'file', 'search'].includes(type)) return false;
-                const rc = el.getBoundingClientRect();
-                return rc.width > 0 && rc.height > 0;
-            });
-
-            let filled = 0;
-            for (const el of fields) {
-                const val = String(el.value || '').trim();
-                if (val) filled += 1;
-            }
-
-            return { usable: fields.length > 0, filled, total: fields.length };
-        };
-
-        const ranked = forms
-            .map((form) => ({ form, score: scoreForm(form) }))
-            .filter((item) => item.score.usable && item.score.filled > 0)
-            .sort((a, b) => {
-                if (b.score.filled !== a.score.filled) return b.score.filled - a.score.filled;
-                return b.score.total - a.score.total;
-            });
-
-        for (const item of ranked) {
-            const form = item.form;
-            try {
-                if (typeof form.requestSubmit === 'function') {
-                    form.requestSubmit();
-                    return `requestSubmit(${item.score.filled}/${item.score.total})`;
-                }
-            } catch (e) {}
-
-            try {
-                const evt = new Event('submit', { bubbles: true, cancelable: true });
-                form.dispatchEvent(evt);
-                if (typeof form.submit === 'function') {
-                    form.submit();
-                }
-                return `form.submit(${item.score.filled}/${item.score.total})`;
-            } catch (e) {}
-        }
-
-        return null;
-    }""")
-    if direct_submit:
-        print(f"   {tag} [Submit] ✓ Direct submit: {direct_submit}")
-        return True, f"direct-submit:{direct_submit}"
-
     print(f"   {tag} [Submit] ✗ NO submit button found anywhere on page")
     return False, "not_found"
 
@@ -2131,10 +1996,6 @@ SUCCESS_KEYWORDS = [
     "message sent","message received","form submitted",
     "inquiry received","we have received","sent successfully",
     "confirmation","we'll be in touch","shortly",
-    "thank you for contacting us","thank you for your inquiry",
-    "we will contact you","we'll contact you",
-    "your message has been sent","your request has been received",
-    "form submitted successfully",
 ]
 THANKYOU_URL_FRAGS = [
     "thank","thanks","success","confirmed","submitted","sent","done","received",
@@ -2191,8 +2052,6 @@ async def get_confirmation(page, target=None, original_url="", company_name="", 
                 "[class*='success' i]", "[class*='thank' i]", "[class*='confirm' i]",
                 ".alert-success", ".form-success", "[role='alert']",
                 ".submitted-message", ".gform_confirmation_message",
-                ".hs-form__success-message", "[data-form-success]", "[data-success]",
-                "[aria-live='polite']", "[aria-live='assertive']",
             ]:
                 try:
                     els = src.locator(sel)
@@ -2209,29 +2068,6 @@ async def get_confirmation(page, target=None, original_url="", company_name="", 
                                 return "Yes", msg
                             elif text:
                                 print(f"   {tag} [Confirm] DOM sel='{sel}' (ignored len={len(text)}): '{text[:60]}'")
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-
-        # ── Validation/error message check (helpful debug signal) ──
-        for src in [s for s in [target, page] if s]:
-            for esel in [
-                ".wpcf7-validation-errors", ".wpcf7-not-valid-tip",
-                "[class*='error' i]", "[class*='invalid' i]", "[aria-invalid='true']",
-                ".gfield_validation_message", ".hs-error-msg", ".hs-error-msgs",
-            ]:
-                try:
-                    errs = src.locator(esel)
-                    for i in range(min(await errs.count(), 5)):
-                        err = errs.nth(i)
-                        try:
-                            if not await err.is_visible():
-                                continue
-                            text = (await err.inner_text()).strip()
-                            if 4 <= len(text) <= 240:
-                                print(f"   {tag} [Confirm] ✗ Validation sel='{esel}' text='{text[:120]}'")
-                                return "No", f"Validation error: {text[:180]}"
                         except Exception:
                             continue
                 except Exception:
@@ -2413,10 +2249,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                        attempt=1, _pitch=None, _subject=None, worker_index=0):
     local_tokens = {"input": 0, "output": 0, "calls": 0}
 
-    if _STOP_FLAG.is_set():
-        print(f"   [{company_name[:20]}] Stop flag set - skipping lead")
-        return
-
     lead_snapshot = token_tracker.get_snapshot(worker_index)  # ← LINE 1
 
     if _pitch and _subject:
@@ -2490,22 +2322,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
     """)
     await page.add_init_script("""
         (() => {
-            function captureFromIframes() {
-                try {
-                    const frames = document.querySelectorAll('iframe[src]');
-                    for (const frame of frames) {
-                        const src = frame.getAttribute('src') || '';
-                        const match = src.match(/[?&](?:sitekey|k)=([^&#]+)/i);
-                        if (!match || !match[1]) continue;
-                        const sk = decodeURIComponent(match[1]);
-                        if (sk) {
-                            if (!window.__hcaptchaSitekey) window.__hcaptchaSitekey = sk;
-                            if (!window.__turnstileSitekey) window.__turnstileSitekey = sk;
-                        }
-                    }
-                } catch (e) {}
-            }
-
             function wrapTurnstile() {
                 try {
                     if (!window.turnstile || window.turnstile.__captured) return;
@@ -2524,24 +2340,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 } catch (e) {}
             }
 
-            function wrapHCaptcha() {
-                try {
-                    if (!window.hcaptcha || window.hcaptcha.__captured) return;
-                    const originalRender = window.hcaptcha.render;
-                    window.hcaptcha.render = function(container, opts) {
-                        try {
-                            const sk = opts && opts.sitekey ? String(opts.sitekey) : null;
-                            if (sk) {
-                                window.__hcaptchaSitekey = sk;
-                                window.hcaptchaSitekey = sk;
-                            }
-                        } catch (e) {}
-                        return originalRender.apply(this, arguments);
-                    };
-                    window.hcaptcha.__captured = true;
-                } catch (e) {}
-            }
-
             try {
                 Object.defineProperty(window, 'turnstile', {
                     configurable: true,
@@ -2555,24 +2353,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 });
             } catch (e) {}
 
-            try {
-                Object.defineProperty(window, 'hcaptcha', {
-                    configurable: true,
-                    set(v) {
-                        this.__hc_internal = v;
-                        try { wrapHCaptcha(); } catch (e) {}
-                    },
-                    get() {
-                        return this.__hc_internal;
-                    }
-                });
-            } catch (e) {}
-
-            setInterval(() => {
-                wrapTurnstile();
-                wrapHCaptcha();
-                captureFromIframes();
-            }, 250);
+            setInterval(wrapTurnstile, 250);
         })();
     """)
     await page.route("**/*", _make_route_handler(main_host, bw))
@@ -2902,11 +2683,6 @@ async def main():
             """Each worker has a fixed index -> fixed proxy slot."""
             prefetch_task = None
             while True:
-                if _STOP_FLAG.is_set():
-                    if prefetch_task:
-                        prefetch_task.cancel()
-                    break
-
                 try:
                     lead_index, lead = queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -2956,9 +2732,6 @@ async def main():
                                    _pitch=pitch, _subject=subject,
                                    worker_index=worker_index)
                 queue.task_done()
-                if _STOP_FLAG.is_set():
-                    print(f"[Worker#{worker_index}] Stop flag detected - halting queue processing")
-                    break
                 print(f"[Worker#{worker_index}] Done [{lead_index}/{total}] | {queue.qsize()} left")
 
         # Spawn workers with explicit indices 0-9
