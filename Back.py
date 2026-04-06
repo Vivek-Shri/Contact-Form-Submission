@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import threading
@@ -20,6 +21,28 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 OUTREACH_SCRIPT = BASE_DIR / "Outreach(1).py"
 LOG_BUFFER_SIZE = 1000
+
+
+def _materialize_google_credentials_file() -> None:
+	raw = str(os.environ.get("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
+	if not raw:
+		return
+
+	creds_path = BASE_DIR / "google_credentials.json"
+	if creds_path.exists():
+		return
+
+	try:
+		parsed = json.loads(raw)
+		creds_path.write_text(json.dumps(parsed), encoding="utf-8")
+	except Exception:
+		try:
+			creds_path.write_text(raw, encoding="utf-8")
+		except Exception:
+			pass
+
+
+_materialize_google_credentials_file()
 
 app = FastAPI(
 	title="Outreach FastAPI Backend",
