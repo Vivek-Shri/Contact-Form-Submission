@@ -1,0 +1,324 @@
+/* ============================================================
+   Universal Contact Form Filler — Dashboard v2 Styles
+   Custom styles on top of Tailwind CSS
+   ============================================================ */
+
+/* Force Chart.js canvas to be transparent */
+canvas {
+    background: transparent !important;
+}
+
+/* Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Nav button */
+.nav-btn {
+    color: #9ca3af;
+}
+
+.nav-btn:hover {
+    background: rgba(99, 102, 241, 0.08);
+    color: #c7d2fe;
+}
+
+.nav-btn.active {
+    background: rgba(99, 102, 241, 0.15);
+    color: #818cf8;
+}
+
+/* Stat cards hover */
+.stat-card {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+}
+
+/* Settings */
+.settings-label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #9ca3af;
+    margin-bottom: 0.375rem;
+}
+
+.settings-input {
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    background: #1e2332;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.75rem;
+    color: #fff;
+    font-size: 0.875rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    outline: none;
+}
+
+.settings-input:focus {
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+/* Settings tabs */
+.settings-tab {
+    color: #9ca3af;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-tab:hover {
+    color: #e5e7eb;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.settings-tab.active {
+    color: #818cf8;
+    background: rgba(99, 102, 241, 0.15);
+}
+
+/* Log lines */
+.log-success {
+    color: #34d399;
+}
+
+.log-error {
+    color: #f87171;
+}
+
+.log-warn {
+    color: #fbbf24;
+}
+
+.log-info {
+    color: #d1d5db;
+}
+
+/* Toast */
+.toast {
+    padding: 0.75rem 1.25rem;
+    border-radius: 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    animation: toastIn 0.3s ease-out;
+    max-width: 360px;
+}
+
+.toast-success {
+    background: #065f46;
+    color: #a7f3d0;
+    border: 1px solid #10b981;
+}
+
+.toast-error {
+    background: #7f1d1d;
+    color: #fca5a5;
+    border: 1px solid #ef4444;
+}
+
+.toast-info {
+    background: #1e1b4b;
+    color: #c7d2fe;
+    border: 1px solid #6366f1;
+}
+
+@keyframes toastIn {
+    from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.95);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Status badges */
+.badge {
+    display: inline-block;
+    padding: 0.125rem 0.625rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+}
+
+.badge-success {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+}
+
+.badge-danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+}
+
+.badge-warn {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+}
+
+.badge-neutral {
+    background: rgba(255, 255, 255, 0.06);
+    color: #9ca3af;
+}
+
+/* Row hover in tables */
+tbody tr {
+    transition: background 0.15s;
+}
+
+tbody tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+/* Sheet row colors */
+.sheet-row-success {
+    border-left: 3px solid #10b981;
+}
+
+.sheet-row-failed {
+    border-left: 3px solid #ef4444;
+}
+
+/* Scraper-specific */
+.scraper-card {
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.scraper-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+.scraper-card:hover::before {
+    opacity: 1;
+}
+
+.scraper-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(99, 102, 241, 0.1);
+}
+
+/* Form badge for scraper results */
+.badge-form-yes {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.badge-form-no {
+    background: rgba(239, 68, 68, 0.1);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.badge-captcha {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+/* Textarea for URL input */
+.scraper-textarea {
+    width: 100%;
+    min-height: 120px;
+    padding: 0.75rem 1rem;
+    background: #1e2332;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.75rem;
+    color: #fff;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    resize: vertical;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    outline: none;
+}
+
+.scraper-textarea:focus {
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.scraper-textarea::placeholder {
+    color: #4b5563;
+}
+
+/* Method badge colors */
+.method-common_path {
+    color: #34d399;
+}
+
+.method-link_scan {
+    color: #60a5fa;
+}
+
+.method-link_scan_no_form {
+    color: #fbbf24;
+}
+
+.method-original_fallback {
+    color: #6b7280;
+}
+
+.method-from_csv {
+    color: #a78bfa;
+}
+
+.method-error {
+    color: #f87171;
+}
+
+/* Pulse animation for running indicator */
+@keyframes gentlePulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.scraper-running-pulse {
+    animation: gentlePulse 2s ease-in-out infinite;
+}
+
+/* Gradient text */
+.gradient-text {
+    background: linear-gradient(135deg, #818cf8, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
