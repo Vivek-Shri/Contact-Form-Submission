@@ -1,6 +1,10 @@
 flask
 gunicorn
 werkzeug
+fastapi
+uvicorn
+pymongo
+dnspython
 
 # scraping
 playwright
