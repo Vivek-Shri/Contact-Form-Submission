@@ -1,0 +1,17 @@
+flask
+gunicorn
+werkzeug
+
+# scraping
+playwright
+requests
+
+# parsing
+beautifulsoup4
+
+# google sheets
+gspread
+oauth2client
+
+# openai
+openai
