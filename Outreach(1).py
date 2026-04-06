@@ -49,7 +49,20 @@ def _load_local_env(env_path: str = ".env"):
         print(f"[Env] Warning: failed loading {env_path}: {e}")
 
 
-_load_local_env()
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_env_candidates = [
+    os.path.join(os.getcwd(), ".env"),
+    os.path.join(_script_dir, ".env"),
+    os.path.join(_script_dir, "..", ".env"),
+    os.path.join(_script_dir, "frontend_cf", ".env"),
+]
+_env_seen = set()
+for _env_path in _env_candidates:
+    _norm = os.path.normcase(os.path.abspath(_env_path))
+    if _norm in _env_seen:
+        continue
+    _env_seen.add(_norm)
+    _load_local_env(_env_path)
 
 # ============================================================
 #   UNIVERSAL CONTACT FORM FILLER - v4
@@ -63,7 +76,7 @@ _load_local_env()
 OPENAI_API_KEY     = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
 OPENAI_FORM_FILL_MODEL = str(os.environ.get("OPENAI_FORM_FILL_MODEL", "gpt-5-nano") or "gpt-5-nano").strip()
 SPREADSHEET_ID     = os.environ.get("SPREADSHEET_ID", "1H5ZyBKwKfoXledQgEDk9LvO4KDXzH3plkeamgEXhrWs")
-CREDS_FILE         = "google_credentials.json"
+CREDS_FILE         = str(os.environ.get("CREDS_FILE", "google_credentials.json") or "google_credentials.json").strip()
 NOPECHA_API_KEYS   = [
     "sub_1TE68RCRwBwvt6ptOHR2oZ2o",      # Key 1
     "sub_1TGgdMCRwBwvt6pt1NbN2LQx",      # Key 2 (20k solves/day)
@@ -76,6 +89,37 @@ _nopecha_credit_start = {}
 _nopecha_credit_current = {}
 _nopecha_run_credit_lock = threading.Lock()
 _nopecha_run_credit_left = None
+
+
+def _resolve_creds_file_path() -> str:
+    raw = str(CREDS_FILE or "google_credentials.json").strip() or "google_credentials.json"
+    expanded = os.path.expanduser(raw)
+    candidates = []
+
+    if os.path.isabs(expanded):
+        candidates.append(expanded)
+    else:
+        candidates.extend(
+            [
+                os.path.join(os.getcwd(), expanded),
+                os.path.join(_script_dir, expanded),
+                os.path.join(_script_dir, "frontend_cf", expanded),
+                os.path.join(_script_dir, "..", expanded),
+            ]
+        )
+
+    seen = set()
+    for candidate in candidates:
+        norm = os.path.normcase(os.path.abspath(candidate))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+
+    if candidates:
+        return os.path.abspath(candidates[0])
+    return os.path.abspath(expanded)
 
 def _next_valid_nopecha_key():
     """Round-robin fetch of the next active API key."""
@@ -7006,7 +7050,8 @@ async def get_confirmation(page, target=None, original_url="", company_name="", 
 
 def get_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+    creds_file_path = _resolve_creds_file_path()
+    creds = ServiceAccountCredentials.from_json_keyfile_name(creds_file_path, scope)
     gc    = gspread.authorize(creds)
     return gc.open_by_key(SPREADSHEET_ID)
 
@@ -7410,7 +7455,8 @@ def get_status_sheet():
 
 def _get_service_account_email() -> str:
     try:
-        with open(CREDS_FILE, "r", encoding="utf-8") as f:
+        creds_file_path = _resolve_creds_file_path()
+        with open(creds_file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return str(data.get("client_email") or "").strip()
     except Exception:

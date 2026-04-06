@@ -1,6 +1,8 @@
 flask
 gunicorn
 werkzeug
+fastapi
+uvicorn
 
 # scraping
 playwright
