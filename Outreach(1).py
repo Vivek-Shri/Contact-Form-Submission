@@ -786,6 +786,9 @@ class TokenTracker:
 
 token_tracker = TokenTracker()
 _STOP_FLAG = threading.Event()
+OUTREACH_MAX_DAILY_SUBMISSIONS = max(0, int(str(os.environ.get("OUTREACH_MAX_DAILY_SUBMISSIONS", "0") or "0").strip() or "0"))
+_success_counter = 0
+_success_lock = threading.Lock()
 
 
 # ============================================================
@@ -1123,6 +1126,15 @@ def _emit_result(company_name, url, submitted, assurance, captcha_status,
     submitted_wo_captcha = submitted_yes and (not captcha_present)
     submitted_with_captcha = submitted_yes and captcha_present
     submitted_overall = submitted_yes
+
+    global _success_counter
+    if submitted_overall and OUTREACH_MAX_DAILY_SUBMISSIONS > 0:
+        with _success_lock:
+            _success_counter += 1
+            if _success_counter >= OUTREACH_MAX_DAILY_SUBMISSIONS:
+                print(f"\n[LIMIT] Reached limit of {OUTREACH_MAX_DAILY_SUBMISSIONS} successful submissions! Initiating shutdown.")
+                _STOP_FLAG.set()
+
     nopecha_credit_used, nopecha_credit_left = _nopecha_credit_for_row(str(captcha_status or ""))
     nopecha_solves = _nopecha_solves_from_credit_used(nopecha_credit_used)
     result_obj = {
@@ -1979,6 +1991,10 @@ def _ai_unique_pitch(greeting: str, base_subject: str, custom_pitch: str, worker
     if guidance:
         prompt += f"- keep the core idea from this guidance but rewrite uniquely: {guidance}\n"
 
+    ai_instruction = str(os.environ.get("AI_INSTRUCTION", "") or "").strip()
+    if ai_instruction:
+        prompt += f"\nCRITICAL AI INSTRUCTION for content logic:\n{ai_instruction}\n"
+
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-5-nano",
@@ -2753,6 +2769,10 @@ PAGE_CONTEXT:
 FIELD_CATALOG_JSON:
 {fields_json}
 """
+        ai_instruction = str(os.environ.get("AI_INSTRUCTION", "") or "").strip()
+        if ai_instruction:
+            prompt += f"\nCRITICAL AI INSTRUCTION for form completion actions:\n{ai_instruction}\n"
+
         est = _estimate_token_count(prompt)
         if est < best_tokens:
             best_tokens = est
@@ -2799,6 +2819,10 @@ Message={_safe_prompt_text(pitch, pitch_chars)}
 FIELD_CATALOG_JSON:
 {fields_json}
 """
+        ai_instruction = str(os.environ.get("AI_INSTRUCTION", "") or "").strip()
+        if ai_instruction:
+            prompt += f"\nCRITICAL AI INSTRUCTION for form completion actions:\n{ai_instruction}\n"
+
         est = _estimate_token_count(prompt)
         if est < best_tokens:
             best_tokens = est
