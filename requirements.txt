@@ -3,8 +3,7 @@ gunicorn
 werkzeug
 fastapi
 uvicorn
-pymongo
-dnspython
+psycopg2-binary
 
 # scraping
 playwright

@@ -1,7 +1,7 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
-import clientPromise from "@/lib/mongodb";
+import pool from "@/lib/db";
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -16,20 +16,19 @@ export const authOptions: NextAuthOptions = {
           throw new Error("Missing email or password");
         }
 
-        const client = await clientPromise;
-        const db = client.db();
-        
-        const user = await db.collection("users").findOne({
-          email: credentials.email.toLowerCase()
-        });
+        const res = await pool.query(
+          'SELECT * FROM users WHERE LOWER(email) = $1',
+          [credentials.email.toLowerCase()]
+        );
+        const user = res.rows[0];
 
-        if (!user || !user.hashedPassword) {
+        if (!user || !user.hashed_password) {
           throw new Error("Invalid email or password");
         }
 
         const isCorrectPassword = await bcrypt.compare(
           credentials.password,
-          user.hashedPassword
+          user.hashed_password
         );
 
         if (!isCorrectPassword) {
@@ -37,7 +36,7 @@ export const authOptions: NextAuthOptions = {
         }
 
         return {
-          id: user._id.toString(),
+          id: user.id.toString(),
           email: user.email,
           name: user.name || user.email.split('@')[0],
         };

@@ -19,9 +19,9 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, PyMongoError
-from pymongo import ReturnDocument
+import psycopg2
+import psycopg2.extras
+from psycopg2 import pool
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -51,84 +51,114 @@ SOCIAL_MEDIA_DOMAINS = {
 }
 
 
-DEFAULT_MONGODB_URI = "mongodb://127.0.0.1:27017"
-DEFAULT_MONGODB_DB = "outreach"
+DEFAULT_DATABASE_URL = "postgresql://postgres:6?9H#@Dv5W+VTEZ@db.rhmqhrjbknazyflmbwbv.supabase.co:5432/postgres"
 
-
-def _resolve_mongodb_uri() -> str:
-	for key in ("MONGODB_URI", "MONGODB_URL", "MONGO_URL", "DATABASE_URL"):
+def _resolve_database_url() -> str:
+	for key in ("DATABASE_URL", "DATABASE_STRING", "POSTGRES_URL", "SUPABASE_DB_URL"):
 		candidate = str(os.environ.get(key, "") or "").strip()
-		if not candidate:
-			continue
-		if candidate.startswith("mongodb://") or candidate.startswith("mongodb+srv://"):
+		if candidate:
 			return candidate
-	return DEFAULT_MONGODB_URI
+	return DEFAULT_DATABASE_URL
 
+DATABASE_URL = _resolve_database_url()
 
-def _resolve_mongodb_db_name(uri: str) -> str:
-	explicit_name = str(os.environ.get("MONGODB_DB", "") or "").strip()
-	if explicit_name:
-		return explicit_name
-
-	parsed = urlparse(uri)
-	db_name_from_path = parsed.path.lstrip("/").split("/", 1)[0]
-	return db_name_from_path or DEFAULT_MONGODB_DB
-
-
-MONGODB_URI = _resolve_mongodb_uri()
-MONGODB_DB_NAME = _resolve_mongodb_db_name(MONGODB_URI)
-MONGODB_SCHEME = MONGODB_URI.split("://", 1)[0] if "://" in MONGODB_URI else "mongodb"
-
+_db_pool: pool.SimpleConnectionPool | None = None
 _db_available = False
 _db_init_error: str | None = None
-_mongo_client: MongoClient | None = None
-_runs_collection = None
-_logs_collection = None
-_campaigns_collection = None
-_contacts_collection = None
-
 
 def _init_db() -> None:
-	global _db_available, _db_init_error, _mongo_client, _runs_collection, _logs_collection
-	global _campaigns_collection, _contacts_collection
+	global _db_available, _db_init_error, _db_pool
 	try:
-		_mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-		_mongo_client.admin.command("ping")
-		db = _mongo_client[MONGODB_DB_NAME]
-		_runs_collection = db["outreach_runs"]
-		_logs_collection = db["outreach_logs"]
-		_campaigns_collection = db["campaigns"]
-		_contacts_collection = db["campaign_contacts"]
-		_runs_collection.create_index("run_id", unique=True)
-		_runs_collection.create_index("started_at")
-		_logs_collection.create_index([("run_id", 1), ("created_at", -1)])
-		_campaigns_collection.create_index("campaign_id", unique=True)
-		_campaigns_collection.create_index("updated_at")
-		_contacts_collection.create_index("campaign_id")
-		_contacts_collection.create_index("created_at")
-		_contacts_collection.create_index([("campaign_id", 1), ("url_key", 1)], unique=True)
+		_db_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+		conn = _db_pool.getconn()
+		with conn.cursor() as cur:
+			# Runs table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS outreach_runs (
+					run_id TEXT PRIMARY KEY,
+					status TEXT NOT NULL,
+					pid INTEGER,
+					csv_path TEXT,
+					started_at TEXT,
+					finished_at TEXT,
+					campaign_id TEXT,
+					campaign_title TEXT,
+					total_leads INTEGER DEFAULT 0,
+					processed_leads INTEGER DEFAULT 0,
+					duplicates_skipped INTEGER DEFAULT 0,
+					resume_skipped_leads INTEGER DEFAULT 0,
+					social_skipped_leads INTEGER DEFAULT 0,
+					resumed_from_run_id TEXT,
+					exit_code INTEGER
+				)
+			""")
+			# Logs table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS outreach_logs (
+					id SERIAL PRIMARY KEY,
+					run_id TEXT NOT NULL,
+					line TEXT NOT NULL,
+					created_at TEXT NOT NULL
+				)
+			""")
+			# Campaigns table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS campaigns (
+					campaign_id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					status TEXT DEFAULT 'draft',
+					ai_instruction TEXT,
+					max_daily_submissions INTEGER DEFAULT 100,
+					search_for_form BOOLEAN DEFAULT FALSE,
+					steps JSONB DEFAULT '[]',
+					created_at TEXT,
+					updated_at TEXT
+				)
+			""")
+			# Contacts table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS campaign_contacts (
+					contact_id TEXT PRIMARY KEY,
+					campaign_id TEXT NOT NULL,
+					company_name TEXT,
+					contact_url TEXT NOT NULL,
+					domain TEXT,
+					location TEXT,
+					industry TEXT,
+					notes TEXT,
+					is_interested BOOLEAN DEFAULT FALSE,
+					url_key TEXT NOT NULL,
+					created_at TEXT,
+					updated_at TEXT,
+			# Users table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS users (
+					id SERIAL PRIMARY KEY,
+					email TEXT UNIQUE NOT NULL,
+					name TEXT,
+					hashed_password TEXT NOT NULL,
+					created_at TEXT
+				)
+			""")
+			conn.commit()
+		_db_pool.putconn(conn)
 		_db_available = True
 		_db_init_error = None
+		print("[DB] PostgreSQL (Supabase) Initialization successful")
 	except Exception as exc:
-		if _mongo_client is not None:
-			try:
-				_mongo_client.close()
-			except Exception:
-				pass
-		_mongo_client = None
-		_runs_collection = None
-		_logs_collection = None
-		_campaigns_collection = None
-		_contacts_collection = None
 		_db_available = False
 		_db_init_error = str(exc)
-		print(f"[DB] Initialization failed: {exc}")
+		print(f"[DB] PostgreSQL Initialization failed: {exc}")
 
 
-def _require_db_collection(collection: Any, label: str):
-	if not _db_available or collection is None:
-		raise HTTPException(status_code=503, detail=f"Database is not connected ({label})")
-	return collection
+def _db_get_conn():
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+	return _db_pool.getconn()
+
+def _db_put_conn(conn):
+	if _db_pool:
+		_db_pool.putconn(conn)
 
 
 def _db_record_run_start(
@@ -145,34 +175,40 @@ def _db_record_run_start(
 	social_skipped_leads: int,
 	resumed_from_run_id: str | None,
 ) -> None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None:
 		return
+	conn = _db_get_conn()
 	try:
-		_runs_collection.update_one(
-			{"run_id": run_id},
-			{
-				"$set": {
-					"run_id": run_id,
-					"status": "running",
-					"pid": pid,
-					"csv_path": csv_path,
-					"started_at": started_at,
-					"campaign_id": campaign_id,
-					"campaign_title": campaign_title,
-					"total_leads": int(total_leads),
-					"processed_leads": 0,
-					"duplicates_skipped": int(duplicates_skipped),
-					"resume_skipped_leads": int(resume_skipped_leads),
-					"social_skipped_leads": int(social_skipped_leads),
-					"resumed_from_run_id": resumed_from_run_id,
-					"finished_at": None,
-					"exit_code": None,
-				}
-			},
-			upsert=True,
-		)
-	except PyMongoError as exc:
+		with conn.cursor() as cur:
+			cur.execute("""
+				INSERT INTO outreach_runs (
+					run_id, status, pid, csv_path, started_at, campaign_id, campaign_title,
+					total_leads, processed_leads, duplicates_skipped, resume_skipped_leads,
+					social_skipped_leads, resumed_from_run_id
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+				ON CONFLICT (run_id) DO UPDATE SET
+					status = EXCLUDED.status,
+					pid = EXCLUDED.pid,
+					csv_path = EXCLUDED.csv_path,
+					started_at = EXCLUDED.started_at,
+					campaign_id = EXCLUDED.campaign_id,
+					campaign_title = EXCLUDED.campaign_title,
+					total_leads = EXCLUDED.total_leads,
+					processed_leads = EXCLUDED.processed_leads,
+					duplicates_skipped = EXCLUDED.duplicates_skipped,
+					resume_skipped_leads = EXCLUDED.resume_skipped_leads,
+					social_skipped_leads = EXCLUDED.social_skipped_leads,
+					resumed_from_run_id = EXCLUDED.resumed_from_run_id
+			""", (
+				run_id, "running", pid, csv_path, started_at, campaign_id, campaign_title,
+				int(total_leads), 0, int(duplicates_skipped), int(resume_skipped_leads),
+				int(social_skipped_leads), resumed_from_run_id
+			))
+			conn.commit()
+	except Exception as exc:
 		print(f"[DB] Failed to record run start: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_update_run_state(
@@ -188,182 +224,191 @@ def _db_update_run_state(
 	social_skipped_leads: int | None = None,
 	resumed_from_run_id: str | None = None,
 ) -> None:
-	if not _db_available or not run_id or _runs_collection is None:
+	if not _db_available or not run_id or _db_pool is None:
 		return
+	conn = _db_get_conn()
 	try:
-		updates: dict[str, Any] = {
-			"status": status,
-		}
+		updates: list[str] = ["status = %s"]
+		params: list[Any] = [status]
+		
 		if finished_at is not None:
-			updates["finished_at"] = finished_at
+			updates.append("finished_at = %s")
+			params.append(finished_at)
 		if exit_code is not None:
-			updates["exit_code"] = int(exit_code)
+			updates.append("exit_code = %s")
+			params.append(int(exit_code))
 		if processed_leads is not None:
-			updates["processed_leads"] = max(0, int(processed_leads))
+			updates.append("processed_leads = %s")
+			params.append(max(0, int(processed_leads)))
 		if total_leads is not None:
-			updates["total_leads"] = max(0, int(total_leads))
+			updates.append("total_leads = %s")
+			params.append(max(0, int(total_leads)))
 		if duplicates_skipped is not None:
-			updates["duplicates_skipped"] = max(0, int(duplicates_skipped))
+			updates.append("duplicates_skipped = %s")
+			params.append(max(0, int(duplicates_skipped)))
 		if resume_skipped_leads is not None:
-			updates["resume_skipped_leads"] = max(0, int(resume_skipped_leads))
+			updates.append("resume_skipped_leads = %s")
+			params.append(max(0, int(resume_skipped_leads)))
 		if social_skipped_leads is not None:
-			updates["social_skipped_leads"] = max(0, int(social_skipped_leads))
+			updates.append("social_skipped_leads = %s")
+			params.append(max(0, int(social_skipped_leads)))
 		if resumed_from_run_id is not None:
-			updates["resumed_from_run_id"] = _safe_trim(resumed_from_run_id)
+			updates.append("resumed_from_run_id = %s")
+			params.append(_safe_trim(resumed_from_run_id))
 
-		_runs_collection.update_one(
-			{"run_id": run_id},
-			{
-				"$set": updates
-			},
-		)
-	except PyMongoError as exc:
+		params.append(run_id)
+		sql = f"UPDATE outreach_runs SET {', '.join(updates)} WHERE run_id = %s"
+		
+		with conn.cursor() as cur:
+			cur.execute(sql, tuple(params))
+			conn.commit()
+	except Exception as exc:
 		print(f"[DB] Failed to update run state: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_append_log(run_id: str | None, line: str) -> None:
-	if not _db_available or not run_id or _logs_collection is None:
+	if not _db_available or not run_id or _db_pool is None:
 		return
+	conn = _db_get_conn()
 	try:
-		_logs_collection.insert_one(
-			{
-				"run_id": run_id,
-				"line": line,
-				"created_at": _utc_now_iso(),
-			}
-		)
-	except PyMongoError as exc:
+		with conn.cursor() as cur:
+			cur.execute("""
+				INSERT INTO outreach_logs (run_id, line, created_at)
+				VALUES (%s, %s, %s)
+			""", (run_id, line, _utc_now_iso()))
+			conn.commit()
+	except Exception as exc:
 		print(f"[DB] Failed to append log: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_get_latest_run() -> dict[str, Any] | None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None:
 		return None
+	conn = _db_get_conn()
 	try:
-		doc = _runs_collection.find_one({}, sort=[("started_at", -1)])
-		if not doc:
-			return None
-		return {
-			"run_id": doc.get("run_id"),
-			"status": doc.get("status"),
-			"pid": doc.get("pid"),
-			"csv_path": doc.get("csv_path"),
-			"campaign_id": doc.get("campaign_id"),
-			"campaign_title": doc.get("campaign_title"),
-			"started_at": doc.get("started_at"),
-			"finished_at": doc.get("finished_at"),
-			"exit_code": doc.get("exit_code"),
-			"total_leads": doc.get("total_leads") or 0,
-			"processed_leads": doc.get("processed_leads") or 0,
-			"duplicates_skipped": doc.get("duplicates_skipped") or 0,
-			"resume_skipped_leads": doc.get("resume_skipped_leads") or 0,
-			"social_skipped_leads": doc.get("social_skipped_leads") or 0,
-			"resumed_from_run_id": doc.get("resumed_from_run_id"),
-		}
-	except PyMongoError:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("SELECT * FROM outreach_runs ORDER BY started_at DESC LIMIT 1")
+			doc = cur.fetchone()
+			if not doc:
+				return None
+			return dict(doc)
+	except Exception:
 		return None
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_get_run(run_id: str) -> dict[str, Any] | None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None:
 		return None
+	conn = _db_get_conn()
 	try:
-		return _runs_collection.find_one(
-			{"run_id": run_id},
-			{
-				"_id": 0,
-				"run_id": 1,
-				"campaign_id": 1,
-				"status": 1,
-				"started_at": 1,
-			},
-		)
-	except PyMongoError:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("""
+				SELECT run_id, campaign_id, status, started_at
+				FROM outreach_runs WHERE run_id = %s
+			""", (run_id,))
+			doc = cur.fetchone()
+			if not doc:
+				return None
+			return dict(doc)
+	except Exception:
 		return None
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_get_latest_resumable_run(campaign_id: str) -> dict[str, Any] | None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None or not campaign_id:
 		return None
-	if not campaign_id:
-		return None
+	conn = _db_get_conn()
 	try:
-		return _runs_collection.find_one(
-			{
-				"campaign_id": campaign_id,
-				"status": {"$nin": ["running", "stopping", "queued"]},
-			},
-			{
-				"_id": 0,
-				"run_id": 1,
-				"campaign_id": 1,
-				"status": 1,
-				"started_at": 1,
-			},
-			sort=[("started_at", -1)],
-		)
-	except PyMongoError:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("""
+				SELECT run_id, campaign_id, status, started_at
+				FROM outreach_runs
+				WHERE campaign_id = %s AND status NOT IN ('running', 'stopping', 'queued')
+				ORDER BY started_at DESC LIMIT 1
+			""", (campaign_id,))
+			doc = cur.fetchone()
+			if not doc:
+				return None
+			return dict(doc)
+	except Exception:
 		return None
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_get_latest_resumable_run_any() -> dict[str, Any] | None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None:
 		return None
+	conn = _db_get_conn()
 	try:
-		return _runs_collection.find_one(
-			{
-				"status": {"$nin": ["running", "stopping", "queued"]},
-			},
-			{
-				"_id": 0,
-				"run_id": 1,
-				"campaign_id": 1,
-				"status": 1,
-				"started_at": 1,
-			},
-			sort=[("started_at", -1)],
-		)
-	except PyMongoError:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("""
+				SELECT run_id, campaign_id, status, started_at
+				FROM outreach_runs
+				WHERE status NOT IN ('running', 'stopping', 'queued')
+				ORDER BY started_at DESC LIMIT 1
+			""")
+			doc = cur.fetchone()
+			if not doc:
+				return None
+			return dict(doc)
+	except Exception:
 		return None
+	finally:
+		_db_put_conn(conn)
 
 
 def _db_get_processed_url_keys(run_id: str) -> set[str]:
-	if not _db_available or _logs_collection is None or not run_id:
+	if not _db_available or _db_pool is None or not run_id:
 		return set()
 
 	keys: set[str] = set()
+	conn = _db_get_conn()
 	try:
-		cursor = _logs_collection.find(
-			{"run_id": run_id},
-			{"_id": 0, "line": 1},
-		).sort("created_at", 1)
-
-		for row in cursor:
-			line = str(row.get("line") or "")
-			parsed = _parse_result_line(line)
-			if parsed is None:
-				continue
-			url_key = _normalize_url_key(str(parsed.get("contactUrl") or ""))
-			if url_key:
-				keys.add(url_key)
-	except PyMongoError:
+		with conn.cursor() as cur:
+			cur.execute("""
+				SELECT line FROM outreach_logs
+				WHERE run_id = %s ORDER BY created_at ASC
+			""", (run_id,))
+			for (line,) in cur:
+				parsed = _parse_result_line(str(line or ""))
+				if parsed is None:
+					continue
+				url_key = _normalize_url_key(str(parsed.get("contactUrl") or ""))
+				if url_key:
+					keys.add(url_key)
+	except Exception:
 		return set()
+	finally:
+		_db_put_conn(conn)
 
 	return keys
 
 
 def _db_get_logs(run_id: str, tail: int) -> list[str]:
-	if not _db_available or _logs_collection is None:
+	if not _db_available or _db_pool is None:
 		return []
+	conn = _db_get_conn()
 	try:
-		cursor = _logs_collection.find(
-			{"run_id": run_id},
-			{"_id": 0, "line": 1},
-		).sort("created_at", -1).limit(int(tail))
-		rows = [str(row.get("line", "")) for row in cursor]
-		return [line for line in reversed(rows) if line]
-	except PyMongoError:
+		with conn.cursor() as cur:
+			cur.execute("""
+				SELECT line FROM outreach_logs
+				WHERE run_id = %s ORDER BY created_at DESC LIMIT %s
+			""", (run_id, int(tail)))
+			rows = [str(row[0] or "") for row in cur]
+			return [line for line in reversed(rows) if line]
+	except Exception:
 		return []
+	finally:
+		_db_put_conn(conn)
 
 
 def _materialize_google_credentials_file() -> None:
@@ -496,15 +541,14 @@ class ContactUpdateRequest(BaseModel):
 	isInterested: bool | None = Field(default=None)
 
 
-def _build_search_filter(search_text: str | None, fields: list[str]) -> dict[str, Any]:
+def _build_search_filter_sql(search_text: str | None, fields: list[str]) -> tuple[str, list[str]]:
 	query_text = _safe_trim(search_text)
 	if not query_text:
-		return {}
-
-	pattern = {"$regex": re.escape(query_text), "$options": "i"}
-	return {
-		"$or": [{field: pattern} for field in fields]
-	}
+		return "1=1", []
+	
+	clauses = " OR ".join([f"{field} ILIKE %s" for field in fields])
+	params = [f"%{query_text}%"] * len(fields)
+	return f"({clauses})", params
 
 
 def _build_pagination_meta(page: int, limit: int, total: int) -> dict[str, int]:
@@ -585,46 +629,51 @@ def _map_contact_document(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def _campaign_last_run(campaign_id: str) -> dict[str, Any] | None:
-	if not _db_available or _runs_collection is None:
+	if not _db_available or _db_pool is None:
 		return None
+	conn = _db_get_conn()
 	try:
-		doc = _runs_collection.find_one(
-			{"campaign_id": campaign_id},
-			{
-				"_id": 0,
-				"run_id": 1,
-				"status": 1,
-				"started_at": 1,
-				"finished_at": 1,
-				"exit_code": 1,
-				"total_leads": 1,
-				"processed_leads": 1,
-				"duplicates_skipped": 1,
-			},
-			sort=[("started_at", -1)],
-		)
-		if not doc:
-			return None
-		return {
-			"runId": _safe_trim(doc.get("run_id")),
-			"status": _safe_trim(doc.get("status")) or "unknown",
-			"startedAt": _safe_trim(doc.get("started_at")),
-			"finishedAt": _safe_trim(doc.get("finished_at")),
-			"exitCode": doc.get("exit_code"),
-			"totalLeads": int(doc.get("total_leads") or 0),
-			"processedLeads": int(doc.get("processed_leads") or 0),
-			"duplicatesSkipped": int(doc.get("duplicates_skipped") or 0),
-		}
-	except PyMongoError:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("""
+				SELECT run_id, status, started_at, finished_at, exit_code, total_leads, processed_leads, duplicates_skipped
+				FROM outreach_runs
+				WHERE campaign_id = %s
+				ORDER BY started_at DESC LIMIT 1
+			""", (campaign_id,))
+			doc = cur.fetchone()
+			if not doc:
+				return None
+			res = dict(doc)
+			# Rename keys to match frontend expectations if necessary
+			return {
+				"runId": res.get("run_id"),
+				"status": res.get("status"),
+				"startedAt": res.get("started_at"),
+				"finishedAt": res.get("finished_at"),
+				"exitCode": res.get("exit_code"),
+				"totalLeads": res.get("total_leads"),
+				"processedLeads": res.get("processed_leads"),
+				"duplicatesSkipped": res.get("duplicates_skipped"),
+			}
+	except Exception:
 		return None
+	finally:
+		_db_put_conn(conn)
 
 
 def _ensure_campaign_exists(campaign_id: str) -> dict[str, Any]:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
-	doc = campaigns.find_one({"campaign_id": campaign_id}, {"_id": 0})
-	if not doc:
-		raise HTTPException(status_code=404, detail="Campaign not found")
-	return doc
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+	conn = _db_get_conn()
+	try:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("SELECT * FROM campaigns WHERE campaign_id = %s", (campaign_id,))
+			doc = cur.fetchone()
+			if not doc:
+				raise HTTPException(status_code=404, detail=f"Campaign not found: {campaign_id}")
+			return dict(doc)
+	finally:
+		_db_put_conn(conn)
 
 
 def _utc_now_iso() -> str:
@@ -1040,7 +1089,7 @@ def health() -> dict:
 	return {
 		"status": "ok",
 		"db_connected": _db_available,
-		"db_engine": MONGODB_SCHEME,
+		"db_engine": "postgresql",
 	}
 
 
@@ -1048,8 +1097,8 @@ def health() -> dict:
 def db_status() -> dict:
 	return {
 		"db_connected": _db_available,
-		"db_engine": MONGODB_SCHEME,
-		"db_name": MONGODB_DB_NAME,
+		"db_engine": "postgresql",
+		"database_url": DATABASE_URL.split("@")[-1], # Mask credentials
 		"db_init_error": _db_init_error,
 	}
 
@@ -1115,60 +1164,73 @@ def list_campaigns(
 	page: int = Query(default=1, ge=1),
 	limit: int = Query(default=25, ge=1, le=200),
 ) -> dict:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
-	search_filter = _build_search_filter(q, ["campaign_id", "name", "description", "status"])
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+		
 	offset = (int(page) - 1) * int(limit)
-
+	where_sql, search_params = _build_search_filter_sql(q, ["campaign_id", "name", "status", "ai_instruction"])
+	
+	conn = _db_get_conn()
 	try:
-		total = int(campaigns.count_documents(search_filter))
-		docs = list(
-			campaigns.find(search_filter, {"_id": 0})
-			.sort("updated_at", -1)
-			.skip(offset)
-			.limit(int(limit))
-		)
-
-		campaign_ids = [_safe_trim(doc.get("campaign_id")) for doc in docs if _safe_trim(doc.get("campaign_id"))]
-		contact_counts: dict[str, int] = {}
-		if campaign_ids:
-			for row in contacts.aggregate(
-				[
-					{"$match": {"campaign_id": {"$in": campaign_ids}}},
-					{"$group": {"_id": "$campaign_id", "count": {"$sum": 1}}},
-				]
-			):
-				campaign_key = _safe_trim(row.get("_id"))
-				if campaign_key:
-					contact_counts[campaign_key] = int(row.get("count") or 0)
-
-		items: list[dict[str, Any]] = []
-		for doc in docs:
-			campaign_id = _safe_trim(doc.get("campaign_id"))
-			items.append(
-				_map_campaign_document(
-					doc,
-					contact_count=contact_counts.get(campaign_id, 0),
-					last_run=_campaign_last_run(campaign_id),
-				)
-			)
-
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			# Count total
+			count_sql = f"SELECT COUNT(*) FROM campaigns WHERE {where_sql}"
+			cur.execute(count_sql, search_params)
+			total = cur.fetchone()[0]
+			
+			# Fetch campaigns
+			fetch_sql = f"SELECT * FROM campaigns WHERE {where_sql} ORDER BY updated_at DESC OFFSET %s LIMIT %s"
+			params = search_params + [offset, limit]
+			cur.execute(fetch_sql, params)
+			campaign_docs = [dict(row) for row in cur]
+			
+			if not campaign_docs:
+				return {
+					"campaigns": [],
+					"pagination": _build_pagination_meta(page, limit, total),
+					"query": {"q": _safe_trim(q)},
+				}
+				
+			campaign_ids = [doc["campaign_id"] for doc in campaign_docs]
+			
+			# Fetch contact counts
+			cur.execute("""
+				SELECT campaign_id, COUNT(*) as count
+				FROM campaign_contacts
+				WHERE campaign_id IN %s
+				GROUP BY campaign_id
+			""", (tuple(campaign_ids),))
+			contact_counts = {row["campaign_id"]: row["count"] for row in cur}
+			
+		items = []
+		for doc in campaign_docs:
+			cid = doc["campaign_id"]
+			items.append(_map_campaign_document(
+				doc,
+				contact_count=contact_counts.get(cid, 0),
+				last_run=_campaign_last_run(cid)
+			))
+			
 		return {
 			"campaigns": items,
 			"pagination": _build_pagination_meta(page, limit, total),
 			"query": {"q": _safe_trim(q)},
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to list campaigns: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to list campaigns: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.post("/campaigns")
 @app.post("/api/campaigns")
 def create_campaign(payload: CampaignCreateRequest) -> dict:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+		
 	now = _utc_now_iso()
 	campaign_id = f"cmp-{uuid.uuid4().hex[:10]}"
-
+	
 	doc = {
 		"campaign_id": campaign_id,
 		"name": _safe_trim(payload.name),
@@ -1180,57 +1242,91 @@ def create_campaign(payload: CampaignCreateRequest) -> dict:
 		"created_at": now,
 		"updated_at": now,
 	}
-
+	
+	conn = _db_get_conn()
 	try:
-		campaigns.insert_one(doc)
+		with conn.cursor() as cur:
+			cur.execute("""
+				INSERT INTO campaigns (
+					campaign_id, name, status, ai_instruction, max_daily_submissions,
+					search_for_form, steps, created_at, updated_at
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+			""", (
+				doc["campaign_id"], doc["name"], doc["status"], doc["ai_instruction"],
+				doc["max_daily_submissions"], doc["search_for_form"],
+				psycopg2.extras.Json(doc["steps"]), doc["created_at"], doc["updated_at"]
+			))
+			conn.commit()
 		return _map_campaign_document(doc, contact_count=0, last_run=None)
-	except DuplicateKeyError as exc:
-		raise HTTPException(status_code=409, detail="Campaign ID collision, please retry") from exc
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to create campaign: {exc}") from exc
+	except psycopg2.IntegrityError:
+		raise HTTPException(status_code=409, detail="Campaign ID collision, please retry")
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to create campaign: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.get("/campaigns/{campaign_id}")
 @app.get("/api/campaigns/{campaign_id}")
 def get_campaign(campaign_id: str) -> dict:
 	doc = _ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
-
+	
+	conn = _db_get_conn()
 	try:
-		count = int(contacts.count_documents({"campaign_id": campaign_id}))
+		with conn.cursor() as cur:
+			cur.execute("SELECT COUNT(*) FROM campaign_contacts WHERE campaign_id = %s", (campaign_id,))
+			count = cur.fetchone()[0]
 		return _map_campaign_document(doc, contact_count=count, last_run=_campaign_last_run(campaign_id))
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to fetch campaign: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to fetch campaign: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.put("/campaigns/{campaign_id}")
 @app.put("/api/campaigns/{campaign_id}")
 def update_campaign(campaign_id: str, payload: CampaignUpdateRequest) -> dict:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
 	_ensure_campaign_exists(campaign_id)
 
-	updates: dict[str, Any] = {}
+	updates: list[str] = []
+	params: list[Any] = []
 	raw = payload.model_dump(exclude_unset=True)
+	
 	for key, value in raw.items():
 		if key == "name":
-			updates["name"] = _safe_trim(value)
+			updates.append("name = %s")
+			params.append(_safe_trim(value))
 		elif key == "aiInstruction":
-			updates["ai_instruction"] = _safe_trim(value)
+			updates.append("ai_instruction = %s")
+			params.append(_safe_trim(value))
 		elif key == "status":
-			updates["status"] = _normalize_campaign_status(str(value))
+			updates.append("status = %s")
+			params.append(_normalize_campaign_status(str(value)))
 		elif key == "maxDailySubmissions" and value is not None:
-			updates["max_daily_submissions"] = int(value)
+			updates.append("max_daily_submissions = %s")
+			params.append(int(value))
 		elif key == "searchForForm" and value is not None:
-			updates["search_for_form"] = bool(value)
+			updates.append("search_for_form = %s")
+			params.append(bool(value))
 		elif key == "steps" and value is not None:
-			updates["steps"] = value
+			updates.append("steps = %s")
+			params.append(psycopg2.extras.Json(value))
 
 	if updates:
-		updates["updated_at"] = _utc_now_iso()
+		updates.append("updated_at = %s")
+		params.append(_utc_now_iso())
+		params.append(campaign_id)
+		sql = f"UPDATE campaigns SET {', '.join(updates)} WHERE campaign_id = %s"
+		
+		conn = _db_get_conn()
 		try:
-			campaigns.update_one({"campaign_id": campaign_id}, {"$set": updates})
-		except PyMongoError as exc:
-			raise HTTPException(status_code=500, detail=f"Unable to update campaign: {exc}") from exc
+			with conn.cursor() as cur:
+				cur.execute(sql, tuple(params))
+				conn.commit()
+		except Exception as exc:
+			raise HTTPException(status_code=500, detail=f"Unable to update campaign: {exc}")
+		finally:
+			_db_put_conn(conn)
 
 	return get_campaign(campaign_id)
 
@@ -1238,20 +1334,27 @@ def update_campaign(campaign_id: str, payload: CampaignUpdateRequest) -> dict:
 @app.delete("/campaigns/{campaign_id}")
 @app.delete("/api/campaigns/{campaign_id}")
 def delete_campaign(campaign_id: str) -> dict:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
 	_ensure_campaign_exists(campaign_id)
 
+	conn = _db_get_conn()
 	try:
-		campaigns.delete_one({"campaign_id": campaign_id})
-		deleted_contacts = contacts.delete_many({"campaign_id": campaign_id}).deleted_count
+		with conn.cursor() as cur:
+			# Delete contacts first due to foreign key constraints if applied (though not explicitly set yet)
+			cur.execute("DELETE FROM campaign_contacts WHERE campaign_id = %s", (campaign_id,))
+			deleted_contacts = cur.rowcount
+			
+			cur.execute("DELETE FROM campaigns WHERE campaign_id = %s", (campaign_id,))
+			conn.commit()
+			
 		return {
 			"status": "deleted",
 			"campaign_id": campaign_id,
 			"deleted_contacts": int(deleted_contacts),
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to delete campaign: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to delete campaign: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.get("/campaigns/{campaign_id}/contacts")
@@ -1263,35 +1366,42 @@ def list_campaign_contacts(
 	limit: int = Query(default=5000, ge=1, le=5000),
 ) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+		
 	offset = (int(page) - 1) * int(limit)
-	query: dict[str, Any] = {"campaign_id": campaign_id}
-	search_filter = _build_search_filter(q, ["company_name", "contact_url", "domain", "location", "industry", "notes"])
-	if search_filter:
-		query["$or"] = search_filter["$or"]
-
+	where_sql, search_params = _build_search_filter_sql(q, ["company_name", "contact_url", "domain", "location", "industry", "notes"])
+	
+	conn = _db_get_conn()
 	try:
-		total = int(contacts.count_documents(query))
-		docs = list(
-			contacts.find(query, {"_id": 0})
-			.sort("updated_at", -1)
-			.skip(offset)
-			.limit(int(limit))
-		)
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute(f"SELECT COUNT(*) FROM campaign_contacts WHERE campaign_id = %s AND {where_sql}", [campaign_id] + search_params)
+			total = cur.fetchone()[0]
+			
+			cur.execute(f"""
+				SELECT * FROM campaign_contacts
+				WHERE campaign_id = %s AND {where_sql}
+				ORDER BY updated_at DESC OFFSET %s LIMIT %s
+			""", [campaign_id] + search_params + [offset, limit])
+			docs = [dict(row) for row in cur]
+			
 		return {
 			"contacts": [_map_contact_document(doc) for doc in docs],
 			"pagination": _build_pagination_meta(page, limit, total),
 			"query": {"q": _safe_trim(q), "campaign_id": campaign_id},
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to list contacts: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to list contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.post("/campaigns/{campaign_id}/contacts")
 @app.post("/api/campaigns/{campaign_id}/contacts")
 def create_campaign_contact(campaign_id: str, payload: CampaignContactCreateRequest) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
 
 	normalized_url, domain, url_key = _normalize_contact_url(payload.contactUrl)
 	now = _utc_now_iso()
@@ -1309,65 +1419,89 @@ def create_campaign_contact(campaign_id: str, payload: CampaignContactCreateRequ
 		"updated_at": now,
 	}
 
+	conn = _db_get_conn()
 	try:
-		contacts.insert_one(doc)
+		with conn.cursor() as cur:
+			cur.execute("""
+				INSERT INTO campaign_contacts (
+					contact_id, campaign_id, company_name, contact_url, domain, url_key,
+					location, industry, notes, created_at, updated_at
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+			""", (
+				doc["contact_id"], doc["campaign_id"], doc["company_name"], doc["contact_url"],
+				doc["domain"], doc["url_key"], doc["location"], doc["industry"], doc["notes"],
+				doc["created_at"], doc["updated_at"]
+			))
+			conn.commit()
 		return _map_contact_document(doc)
-	except DuplicateKeyError as exc:
-		raise HTTPException(status_code=409, detail="Contact URL already exists in this campaign") from exc
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to create contact: {exc}") from exc
+	except psycopg2.IntegrityError:
+		raise HTTPException(status_code=409, detail="Contact URL already exists in this campaign")
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to create contact: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.post("/campaigns/{campaign_id}/contacts/bulk")
 @app.post("/api/campaigns/{campaign_id}/contacts/bulk")
 def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateRequest) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts_collection = _require_db_collection(_contacts_collection, "campaign_contacts")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
 	
-	docs_to_insert = []
 	now = _utc_now_iso()
-	seen_urls = set()
+	docs_to_insert = []
+	seen_url_keys = set()
 	
 	for item in payload.contacts:
 		company_name, contact_url = _extract_lead_info(item)
 		if not contact_url:
 			continue
-			
 		try:
 			normalized_url, domain, url_key = _normalize_contact_url(contact_url)
 		except HTTPException:
 			continue
 			
-		if url_key in seen_urls:
+		if url_key in seen_url_keys:
 			continue
-		seen_urls.add(url_key)
+		seen_url_keys.add(url_key)
 			
-		doc = {
-			"contact_id": f"lead-{uuid.uuid4().hex[:10]}",
-			"campaign_id": campaign_id,
-			"company_name": _safe_trim(company_name) or "Unknown",
-			"contact_url": normalized_url,
-			"domain": domain,
-			"url_key": url_key,
-			"location": _safe_trim(item.get("location")),
-			"industry": _safe_trim(item.get("industry")),
-			"notes": _safe_trim(item.get("notes")),
-			"created_at": now,
-			"updated_at": now,
-		}
-		docs_to_insert.append(doc)
+		docs_to_insert.append((
+			f"lead-{uuid.uuid4().hex[:10]}",
+			campaign_id,
+			_safe_trim(company_name) or "Unknown",
+			normalized_url,
+			domain,
+			url_key,
+			_safe_trim(item.get("location")),
+			_safe_trim(item.get("industry")),
+			_safe_trim(item.get("notes")),
+			now,
+			now
+		))
 	
-	inserted = 0
-	if docs_to_insert:
-		try:
-			res = contacts_collection.insert_many(docs_to_insert, ordered=False)
-			inserted = len(res.inserted_ids)
-		except PyMongoError as exc:
-			# Ignore duplicate key errors if some already exist
-			if hasattr(exc, "details") and isinstance(exc.details, dict):
-				inserted = exc.details.get("nInserted", inserted)
+	if not docs_to_insert:
+		return {"message": "No valid contacts to process."}
 
-	return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}."}
+	conn = _db_get_conn()
+	inserted = 0
+	try:
+		with conn.cursor() as cur:
+			# Use execute_values for efficient bulk insertion
+			psycopg2.extras.execute_values(cur, """
+				INSERT INTO campaign_contacts (
+					contact_id, campaign_id, company_name, contact_url, domain, url_key,
+					location, industry, notes, created_at, updated_at
+				) VALUES %s
+				ON CONFLICT (campaign_id, url_key) DO NOTHING
+			""", docs_to_insert)
+			inserted = cur.rowcount
+			conn.commit()
+		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}."}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 
@@ -1375,66 +1509,87 @@ def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateR
 @app.delete("/api/campaigns/{campaign_id}/contacts")
 def delete_all_campaign_contacts(campaign_id: str) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
-
+	
+	conn = _db_get_conn()
 	try:
-		result = contacts.delete_many({"campaign_id": campaign_id})
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM campaign_contacts WHERE campaign_id = %s", (campaign_id,))
+			deleted_count = cur.rowcount
+			conn.commit()
 		return {
 			"status": "deleted",
-			"deleted_count": result.deleted_count,
+			"deleted_count": deleted_count,
 			"campaign_id": campaign_id,
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to delete contacts: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to delete contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.delete("/campaigns/{campaign_id}/contacts/{contact_id}")
 @app.delete("/api/campaigns/{campaign_id}/contacts/{contact_id}")
 def delete_campaign_contact(campaign_id: str, contact_id: str) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
 
+	conn = _db_get_conn()
 	try:
-		result = contacts.delete_one({"campaign_id": campaign_id, "contact_id": contact_id})
-		if result.deleted_count == 0:
-			raise HTTPException(status_code=404, detail="Contact not found")
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM campaign_contacts WHERE campaign_id = %s AND contact_id = %s", (campaign_id, contact_id))
+			if cur.rowcount == 0:
+				raise HTTPException(status_code=404, detail="Contact not found")
+			conn.commit()
 		return {
 			"status": "deleted",
 			"campaign_id": campaign_id,
 			"contact_id": contact_id,
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to delete contact: {exc}") from exc
+	except HTTPException:
+		raise
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to delete contact: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.patch("/campaigns/{campaign_id}/contacts/{contact_id}")
 @app.patch("/api/campaigns/{campaign_id}/contacts/{contact_id}")
 def update_campaign_contact(campaign_id: str, contact_id: str, payload: ContactUpdateRequest) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
 
-	updates: dict[str, Any] = {}
+	updates: list[str] = []
+	params: list[Any] = []
 	if payload.companyName is not None:
-		updates["company_name"] = _safe_trim(payload.companyName)
+		updates.append("company_name = %s")
+		params.append(_safe_trim(payload.companyName))
 	if payload.isInterested is not None:
-		updates["is_interested"] = bool(payload.isInterested)
+		updates.append("is_interested = %s")
+		params.append(bool(payload.isInterested))
 
 	if not updates:
 		return {"status": "no changes"}
 
-	updates["updated_at"] = _utc_now_iso()
+	updates.append("updated_at = %s")
+	params.append(_utc_now_iso())
+	params.append(campaign_id)
+	params.append(contact_id)
 
+	conn = _db_get_conn()
 	try:
-		result = contacts.find_one_and_update(
-			{"campaign_id": campaign_id, "contact_id": contact_id},
-			{"$set": updates},
-			return_document=ReturnDocument.AFTER,
-		)
-		if not result:
-			raise HTTPException(status_code=404, detail="Contact not found")
-		return _map_contact_document(result)
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to update contact: {exc}") from exc
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			sql = f"UPDATE campaign_contacts SET {', '.join(updates)} WHERE campaign_id = %s AND contact_id = %s RETURNING *"
+			cur.execute(sql, tuple(params))
+			row = cur.fetchone()
+			if not row:
+				raise HTTPException(status_code=404, detail="Contact not found")
+			conn.commit()
+			return _map_contact_document(dict(row))
+	except HTTPException:
+		raise
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to update contact: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.get("/contacts")
@@ -1445,55 +1600,43 @@ def list_all_contacts(
 	page: int = Query(default=1, ge=1),
 	limit: int = Query(default=50, ge=1, le=200000),
 ) -> dict:
-	campaigns = _require_db_collection(_campaigns_collection, "campaigns")
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+		
 	offset = (int(page) - 1) * int(limit)
+	where_clauses: list[str] = ["1=1"]
+	params: list[Any] = []
 
-	query: dict[str, Any] = {}
 	if campaign_id:
-		query["campaign_id"] = campaign_id
+		where_clauses.append("campaign_id = %s")
+		params.append(campaign_id)
+		
+	search_sql, search_params = _build_search_filter_sql(q, ["company_name", "contact_url", "domain", "location", "industry", "notes"])
+	if search_sql != "1=1":
+		where_clauses.append(search_sql)
+		params.extend(search_params)
 
+	conn = _db_get_conn()
 	try:
-		campaign_docs = list(campaigns.find({}, {"_id": 0, "campaign_id": 1, "name": 1}))
-		campaign_name_map = {
-			_safe_trim(doc.get("campaign_id")): _safe_trim(doc.get("name")) for doc in campaign_docs
-		}
-
-		query_text = _safe_trim(q)
-		if query_text:
-			pattern = {"$regex": re.escape(query_text), "$options": "i"}
-			search_clauses: list[dict[str, Any]] = [
-				{"company_name": pattern},
-				{"contact_url": pattern},
-				{"domain": pattern},
-				{"location": pattern},
-				{"industry": pattern},
-				{"notes": pattern},
-			]
-
-			matching_campaign_ids = [
-				_safe_trim(doc.get("campaign_id"))
-				for doc in campaign_docs
-				if query_text.lower() in _safe_trim(doc.get("name")).lower()
-			]
-			matching_campaign_ids = [item for item in matching_campaign_ids if item]
-			if matching_campaign_ids:
-				search_clauses.append({"campaign_id": {"$in": matching_campaign_ids}})
-
-			if query:
-				query = {"$and": [query, {"$or": search_clauses}]}
-			else:
-				query = {"$or": search_clauses}
-
-		total = int(contacts.count_documents(query))
-
-		contact_docs = list(
-			contacts.find(query, {"_id": 0})
-			.sort("updated_at", -1)
-			.skip(offset)
-			.limit(int(limit))
-		)
-		items: list[dict[str, Any]] = []
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			# Get campaign name map
+			cur.execute("SELECT campaign_id, name FROM campaigns")
+			campaign_name_map = {row["campaign_id"]: row["name"] for row in cur}
+			
+			# Count total
+			where_str = " AND ".join(where_clauses)
+			cur.execute(f"SELECT COUNT(*) FROM campaign_contacts WHERE {where_str}", params)
+			total = cur.fetchone()[0]
+			
+			# Fetch contacts
+			cur.execute(f"""
+				SELECT * FROM campaign_contacts
+				WHERE {where_str}
+				ORDER BY updated_at DESC OFFSET %s LIMIT %s
+			""", params + [offset, limit])
+			contact_docs = [dict(row) for row in cur]
+			
+		items = []
 		for doc in contact_docs:
 			mapped = _map_contact_document(doc)
 			mapped["campaignName"] = campaign_name_map.get(mapped["campaignId"], "")
@@ -1504,33 +1647,47 @@ def list_all_contacts(
 			"pagination": _build_pagination_meta(page, limit, total),
 			"query": {"q": _safe_trim(q), "campaign_id": _safe_trim(campaign_id)},
 		}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to list contacts: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to list contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.delete("/api/contacts/{contact_id}")
 def delete_contact_global(contact_id: str) -> dict:
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
 	contact_id_clean = _safe_trim(contact_id)
 	if not contact_id_clean:
 		raise HTTPException(status_code=400, detail="Invalid contact ID")
+		
+	conn = _db_get_conn()
 	try:
-		result = contacts.delete_one({"contact_id": contact_id_clean})
-		if result.deleted_count == 0:
-			raise HTTPException(status_code=404, detail="Contact not found")
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM campaign_contacts WHERE contact_id = %s", (contact_id_clean,))
+			if cur.rowcount == 0:
+				raise HTTPException(status_code=404, detail="Contact not found")
+			conn.commit()
 		return {"message": "Contact deleted successfully"}
+	except HTTPException:
+		raise
 	except Exception as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to delete contact: {exc}") from exc
+		raise HTTPException(status_code=500, detail=f"Unable to delete contact: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.delete("/api/contacts")
 def delete_all_contacts() -> dict:
-	contacts = _require_db_collection(_contacts_collection, "campaign_contacts")
+	conn = _db_get_conn()
 	try:
-		result = contacts.delete_many({})
-		return {"message": f"Successfully deleted {result.deleted_count} contacts"}
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM campaign_contacts")
+			count = cur.rowcount
+			conn.commit()
+		return {"message": f"Successfully deleted {count} contacts"}
 	except Exception as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to delete contacts: {exc}") from exc
+		raise HTTPException(status_code=500, detail=f"Unable to delete contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 class BulkContactsCreateRequest(BaseModel):
@@ -1538,43 +1695,52 @@ class BulkContactsCreateRequest(BaseModel):
 
 @app.post("/api/contacts/bulk")
 def create_bulk_contacts(payload: BulkContactsCreateRequest) -> dict:
-	contacts_collection = _require_db_collection(_contacts_collection, "campaign_contacts")
-	docs_to_insert = []
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+	
 	now = _utc_now_iso()
+	docs_to_insert = []
 	
 	for item in payload.contacts:
 		company_name, contact_url = _extract_lead_info(item)
 		if not contact_url:
 			continue
-			
 		try:
 			normalized_url, domain, url_key = _normalize_contact_url(contact_url)
 		except HTTPException:
 			continue
 			
-		doc = {
-			"contact_id": f"lead-{uuid.uuid4().hex[:10]}",
-			"campaign_id": "",
-			"company_name": _safe_trim(company_name) or "Unknown",
-			"contact_url": normalized_url,
-			"domain": domain,
-			"url_key": url_key,
-			"location": "",
-			"industry": "",
-			"notes": "",
-			"created_at": now,
-			"updated_at": now,
-		}
-		docs_to_insert.append(doc)
+		docs_to_insert.append((
+			f"lead-{uuid.uuid4().hex[:10]}",
+			"", # No campaign ID
+			_safe_trim(company_name) or "Unknown",
+			normalized_url,
+			domain,
+			url_key,
+			"", "", "", # location, industry, notes
+			now,
+			now
+		))
 	
-	if docs_to_insert:
-		try:
-			contacts_collection.insert_many(docs_to_insert, ordered=False)
-		except Exception as exc:
-			# Ignore duplicate key errors if some already exist
-			pass
+	if not docs_to_insert:
+		return {"message": "No valid contacts to process."}
 
-	return {"message": f"Successfully processed {len(docs_to_insert)} contacts"}
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			psycopg2.extras.execute_values(cur, """
+				INSERT INTO campaign_contacts (
+					contact_id, campaign_id, company_name, contact_url, domain, url_key,
+					location, industry, notes, created_at, updated_at
+				) VALUES %s
+				ON CONFLICT (campaign_id, url_key) DO NOTHING
+			""", docs_to_insert)
+			conn.commit()
+		return {"message": f"Successfully processed {len(docs_to_insert)} contacts"}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.get("/campaigns/{campaign_id}/runs")
@@ -1584,26 +1750,23 @@ def list_campaign_runs(
 	limit: int = Query(default=25, ge=1, le=200),
 ) -> dict:
 	_ensure_campaign_exists(campaign_id)
-	runs = _require_db_collection(_runs_collection, "outreach_runs")
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
 
+	conn = _db_get_conn()
 	try:
-		cursor = runs.find(
-			{"campaign_id": campaign_id},
-			{
-				"_id": 0,
-				"run_id": 1,
-				"status": 1,
-				"started_at": 1,
-				"finished_at": 1,
-				"exit_code": 1,
-				"total_leads": 1,
-				"processed_leads": 1,
-				"duplicates_skipped": 1,
-			},
-		).sort("started_at", -1).limit(int(limit))
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("""
+				SELECT run_id, status, started_at, finished_at, exit_code, total_leads, processed_leads, duplicates_skipped
+				FROM outreach_runs
+				WHERE campaign_id = %s
+				ORDER BY started_at DESC LIMIT %s
+			""", (campaign_id, int(limit)))
+			rows = cur.fetchall()
 
-		items = [
-			{
+		items = []
+		for doc in rows:
+			items.append({
 				"runId": _safe_trim(doc.get("run_id")),
 				"status": _safe_trim(doc.get("status")) or "unknown",
 				"startedAt": _safe_trim(doc.get("started_at")),
@@ -1612,13 +1775,13 @@ def list_campaign_runs(
 				"totalLeads": int(doc.get("total_leads") or 0),
 				"processedLeads": int(doc.get("processed_leads") or 0),
 				"duplicatesSkipped": int(doc.get("duplicates_skipped") or 0),
-			}
-			for doc in cursor
-		]
+			})
 
 		return {"runs": items}
-	except PyMongoError as exc:
-		raise HTTPException(status_code=500, detail=f"Unable to list campaign runs: {exc}") from exc
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Unable to list campaign runs: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 @app.post("/outreach/start")

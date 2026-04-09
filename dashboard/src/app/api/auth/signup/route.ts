@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
-import clientPromise from '@/lib/mongodb';
+import pool from '@/lib/db';
 
 export async function POST(req: Request) {
   try {
@@ -13,13 +13,10 @@ export async function POST(req: Request) {
       );
     }
 
-    const client = await clientPromise;
-    const db = client.db();
-
     const normalizedEmail = email.toLowerCase();
 
-    const existingUser = await db.collection('users').findOne({ email: normalizedEmail });
-    if (existingUser) {
+    const existingRes = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
+    if (existingRes.rows.length > 0) {
       return NextResponse.json(
         { message: 'User already exists' },
         { status: 422 }
@@ -28,15 +25,13 @@ export async function POST(req: Request) {
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    const result = await db.collection('users').insertOne({
-      email: normalizedEmail,
-      name: name || '',
-      hashedPassword,
-      createdAt: new Date(),
-    });
+    const insertRes = await pool.query(
+      'INSERT INTO users (email, name, hashed_password, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
+      [normalizedEmail, name || '', hashedPassword, new Date().toISOString()]
+    );
 
     return NextResponse.json(
-      { message: 'User created', userId: result.insertedId },
+      { message: 'User created', userId: insertRes.rows[0].id },
       { status: 201 }
     );
   } catch (error) {
