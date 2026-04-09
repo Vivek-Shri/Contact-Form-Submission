@@ -1,2179 +1,1294 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  FolderKanban,
-  ListChecks,
-  Loader2,
-  Play,
-  Plus,
-  Settings2,
-  StopCircle,
-  Target,
-  Trash2,
-  UploadCloud,
   Users,
+  Activity,
+  Settings,
+  Plus,
   X,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
+  Trash2,
+  Download as DownloadIcon,
+  ExternalLink,
+  Heart,
+  Database,
+  Search,
+  ChevronLeft,
+  Play,
+  Square,
+  Terminal,
+  RefreshCw,
 } from "lucide-react";
-import Papa from "papaparse";
 
-type MainSection = "overview" | "contacts" | "campaigns";
-type ContactsTab = "companies" | "lists";
-type CampaignTab = "contacts" | "retarget" | "settings" | "logs";
-type ContactStatus = "ready" | "submitted" | "failed" | "warning";
-type RunStatus = "queued" | "running" | "completed" | "failed" | "stopped";
-type StatusTone = "info" | "success" | "error";
+import type {
+  CampaignRecord,
+  CampaignRunSummary,
+  ContactRecord,
+  OutreachRunSnapshot,
+} from "@/lib/models";
+import { formatDateTime, statusTone } from "@/lib/ui";
 
-interface RunResultRow {
-  campaignId: string;
-  campaignTitle: string;
-  companyName: string;
-  contactUrl: string;
-  submitted: "Yes" | "No";
-  status: "success" | "fail" | "warning";
-  captchaStatus: string;
-  confirmationMsg: string;
-  estCostUsd: number;
+/* ─── Local List Types ─────────────────────────────────────── */
+interface ListContact { companyName: string; contactUrl: string; }
+interface ContactList { id: string; name: string; contacts: ListContact[]; createdAt: string; }
+const LS_KEY = "outreach-contact-lists";
+function loadLists(): ContactList[] {
+  try { const raw = localStorage.getItem(LS_KEY); return raw ? (JSON.parse(raw) as ContactList[]) : []; }
+  catch { return []; }
 }
 
-interface OutreachRunSnapshot {
-  runId: string;
-  status: RunStatus;
-  progress: number;
-  totalLeads: number;
-  processedLeads: number;
-  currentLead: string;
-  logs: string[];
-  results: RunResultRow[];
-  duplicatesSkipped: number;
-  captchaCreditsUsedToday: number;
-  captchaCreditsLimit: number;
-  captchaCreditsRemaining: number;
-  startedAt: string;
-  endedAt?: string;
-  error?: string;
+/* ─── Types ────────────────────────────────────────────────── */
+interface CampaignContactsResponse { contacts: ContactRecord[]; }
+interface CampaignRunsResponse { runs: CampaignRunSummary[]; }
+
+const RUN_POLL_INTERVAL_MS = 2500;
+type Tab = "contacts" | "activity" | "settings";
+type FilterMode = "all" | "success" | "fail" | "pending" | "warning";
+
+function isActiveRun(status: string) {
+  return ["running", "queued"].includes(status.trim().toLowerCase());
 }
 
-interface ContactResult {
-  status: ContactStatus;
-  confirmation: string;
-  captchaStatus: string;
-  costUsd: number;
-}
-
-interface ContactRecord {
-  id: string;
-  companyName: string;
-  domain: string;
-  location: string;
-  industry: string;
-  employeeSize: string;
-  contactUrl: string;
-  listIds: string[];
-  status: ContactStatus;
-  lastUpdatedAt: string;
-  lastResult?: ContactResult;
-}
-
-interface ContactListRecord {
-  id: string;
-  name: string;
-  createdAt: string;
-  contactIds: string[];
-}
-
-interface RetargetStep {
-  id: string;
-  title: string;
-  daysAfter: number;
-  enabled: boolean;
-}
-
-interface CampaignRunSummary {
-  runId: string;
-  status: RunStatus;
-  startedAt: string;
-  endedAt?: string;
-  processedLeads: number;
-  totalLeads: number;
-  successCount: number;
-  failCount: number;
-  warningCount: number;
-  duplicatesSkipped: number;
-  captchaCreditsUsedToday: number;
-  captchaCreditsLimit: number;
-  captchaCreditsRemaining: number;
-  error?: string;
-  logsTail: string[];
-}
-
-interface CampaignRecord {
-  id: string;
-  name: string;
-  aiInstruction: string;
-  maxDailySubmissions: number;
-  listIds: string[];
-  createdAt: string;
-  steps: RetargetStep[];
-  runSummaries: CampaignRunSummary[];
-  lastRunId?: string;
-}
-
-interface BannerState {
-  tone: StatusTone;
-  message: string;
-}
-
-const LIST_SAAS_US = "list-saas-us";
-const LIST_AGENCIES = "list-agencies";
-
-const INITIAL_LISTS: ContactListRecord[] = [
-  {
-    id: LIST_SAAS_US,
-    name: "US SaaS Contacts",
-    createdAt: "2026-04-01T10:20:00.000Z",
-    contactIds: ["contact-rapidflow", "contact-maplesoft"],
-  },
-  {
-    id: LIST_AGENCIES,
-    name: "Growth Agencies",
-    createdAt: "2026-04-02T12:15:00.000Z",
-    contactIds: ["contact-northstar", "contact-pixelmint"],
-  },
-];
-
-const INITIAL_CONTACTS: ContactRecord[] = [
-  {
-    id: "contact-rapidflow",
-    companyName: "RapidFlow Labs",
-    domain: "rapidflow.ai",
-    location: "Austin, US",
-    industry: "SaaS",
-    employeeSize: "51-200",
-    contactUrl: "https://rapidflow.ai/contact",
-    listIds: [LIST_SAAS_US],
-    status: "ready",
-    lastUpdatedAt: "2026-04-01T10:20:00.000Z",
-  },
-  {
-    id: "contact-maplesoft",
-    companyName: "MapleSoft Cloud",
-    domain: "maplesoftcloud.com",
-    location: "Toronto, CA",
-    industry: "Cloud Software",
-    employeeSize: "11-50",
-    contactUrl: "https://maplesoftcloud.com/contact-us",
-    listIds: [LIST_SAAS_US],
-    status: "ready",
-    lastUpdatedAt: "2026-04-01T10:20:00.000Z",
-  },
-  {
-    id: "contact-northstar",
-    companyName: "Northstar Growth",
-    domain: "northstargrowth.co",
-    location: "London, UK",
-    industry: "Marketing Agency",
-    employeeSize: "11-50",
-    contactUrl: "https://northstargrowth.co/contact",
-    listIds: [LIST_AGENCIES],
-    status: "ready",
-    lastUpdatedAt: "2026-04-02T12:15:00.000Z",
-  },
-  {
-    id: "contact-pixelmint",
-    companyName: "PixelMint Digital",
-    domain: "pixelmint.io",
-    location: "Berlin, DE",
-    industry: "Performance Agency",
-    employeeSize: "11-50",
-    contactUrl: "https://pixelmint.io/contact",
-    listIds: [LIST_AGENCIES],
-    status: "ready",
-    lastUpdatedAt: "2026-04-02T12:15:00.000Z",
-  },
-];
-
-const DEFAULT_RETARGET_STEPS: RetargetStep[] = [
-  {
-    id: "step-1",
-    title: "Step 1 - Follow-up email",
-    daysAfter: 2,
-    enabled: true,
-  },
-  {
-    id: "step-2",
-    title: "Step 2 - Reminder with value proof",
-    daysAfter: 5,
-    enabled: true,
-  },
-  {
-    id: "step-3",
-    title: "Step 3 - Final touchpoint",
-    daysAfter: 9,
-    enabled: false,
-  },
-];
-
-const INITIAL_CAMPAIGNS: CampaignRecord[] = [
-  {
-    id: "campaign-spring-intake",
-    name: "Spring Intake Push",
-    aiInstruction:
-      "Write a concise outreach message with one clear CTA. Mention efficiency and include a trustworthy tone.",
-    maxDailySubmissions: 70,
-    listIds: [LIST_SAAS_US],
-    createdAt: "2026-04-03T08:40:00.000Z",
-    steps: DEFAULT_RETARGET_STEPS,
-    runSummaries: [],
-  },
-];
-
-const CSV_TEMPLATE_FILE_NAME = "contacts-template.csv";
-const POLL_INTERVAL_MS = 2500;
-
-function createId(prefix: string): string {
-  const raw =
-    typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
-      ? globalThis.crypto.randomUUID().replace(/-/g, "")
-      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-
-  return `${prefix}-${raw.slice(0, 10)}`;
-}
-
-function ensureProtocol(rawUrl: string): string {
-  const value = rawUrl.trim();
-  if (!value) {
-    return "";
-  }
-
-  if (/^https?:\/\//i.test(value)) {
-    return value;
-  }
-
-  return `https://${value}`;
-}
-
-function normalizeUrlKey(rawUrl: string): string {
-  const value = rawUrl.trim();
-  if (!value) {
-    return "";
-  }
-
-  try {
-    const parsed = new URL(ensureProtocol(value));
-    const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
-    const pathname = parsed.pathname.replace(/\/+$/g, "") || "/";
-    return `${host}${pathname}`;
-  } catch {
-    return value.toLowerCase();
-  }
-}
-
-function getDomainFromUrl(rawUrl: string): string {
-  const withProtocol = ensureProtocol(rawUrl);
-
-  try {
-    return new URL(withProtocol).hostname.replace(/^www\./i, "").toLowerCase();
-  } catch {
-    return withProtocol.replace(/^https?:\/\//i, "").replace(/^www\./i, "").split("/")[0];
-  }
-}
-
-function pickCsvValue(row: Record<string, string>, candidates: string[]): string {
-  const lowerMap = new Map<string, string>();
-
-  for (const [key, value] of Object.entries(row)) {
-    lowerMap.set(key.trim().toLowerCase(), String(value ?? "").trim());
-  }
-
-  for (const candidate of candidates) {
-    const value = lowerMap.get(candidate.toLowerCase());
-    if (value) {
-      return value;
-    }
-  }
-
-  return "";
-}
-
-function clampPositiveInt(raw: string, fallback: number): number {
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return parsed;
-}
-
-function formatPercent(numerator: number, denominator: number): string {
-  if (denominator <= 0) {
-    return "0%";
-  }
-  return `${Math.round((numerator / denominator) * 100)}%`;
-}
-
-function formatTimestamp(iso: string | undefined): string {
-  if (!iso) {
-    return "-";
-  }
-
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-
-  return date.toLocaleString();
-}
-
-function formatCurrency(value: number): string {
-  return `$${value.toFixed(4)}`;
-}
-
-function resultToContactStatus(result: RunResultRow): ContactStatus {
-  if (result.status === "success" && result.submitted === "Yes") {
-    return "submitted";
-  }
-
-  if (result.status === "warning") {
-    return "warning";
-  }
-
-  return "failed";
-}
-
-function toRunSummary(snapshot: OutreachRunSnapshot): CampaignRunSummary {
-  const successCount = snapshot.results.filter((result) => result.status === "success").length;
-  const failCount = snapshot.results.filter((result) => result.status === "fail").length;
-  const warningCount = snapshot.results.filter((result) => result.status === "warning").length;
-
+/* ─── Captcha Status Parser ────────────────────────────────── */
+function parseCaptchaStatus(captchaStatus: string) {
+  const s = (captchaStatus || "").toLowerCase();
   return {
-    runId: snapshot.runId,
-    status: snapshot.status,
-    startedAt: snapshot.startedAt,
-    endedAt: snapshot.endedAt,
-    processedLeads: snapshot.processedLeads,
-    totalLeads: snapshot.totalLeads,
-    successCount,
-    failCount,
-    warningCount,
-    duplicatesSkipped: snapshot.duplicatesSkipped,
-    captchaCreditsUsedToday: snapshot.captchaCreditsUsedToday,
-    captchaCreditsLimit: snapshot.captchaCreditsLimit,
-    captchaCreditsRemaining: snapshot.captchaCreditsRemaining,
-    error: snapshot.error,
-    logsTail: snapshot.logs.slice(-120),
+    found: s.includes("found") || s.includes("detected") || s.includes("present"),
+    solved: s.includes("solved") || s.includes("passed") || s.includes("success"),
+    siteKeyNotFound: s.includes("site key not found") || s.includes("no site key") || s.includes("sitekey not"),
   };
 }
 
-function contactStatusClass(status: ContactStatus): string {
-  if (status === "submitted") {
-    return "bg-emerald-500/20 text-emerald-200 border border-emerald-300/40";
-  }
+/* ─── Status Icon Helper ───────────────────────────────────── */
+const StatusIcon = ({ status }: { status: string | null }) => {
+  if (!status) return <Clock size={14} style={{ color: "#9ca3af" }} />;
+  if (status === "success") return <CheckCircle2 size={14} style={{ color: "#16a34a" }} />;
+  if (status === "fail") return <XCircle size={14} style={{ color: "#dc2626" }} />;
+  if (status === "warning") return <AlertTriangle size={14} style={{ color: "#d97706" }} />;
+  return <Clock size={14} style={{ color: "#9ca3af" }} />;
+};
 
-  if (status === "failed") {
-    return "bg-rose-500/20 text-rose-200 border border-rose-300/40";
-  }
+/* ─── Normalize URL ────────────────────────────────────────── */
+const normUrl = (url?: string) => {
+  if (!url) return "";
+  return url.toLowerCase().trim().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
+};
 
-  if (status === "warning") {
-    return "bg-amber-500/20 text-amber-200 border border-amber-300/40";
-  }
+export default function CampaignDetailPage() {
+  const router = useRouter();
+  const params = useParams<{ campaignId: string }>();
+  const campaignId = params.campaignId;
 
-  return "bg-slate-500/20 text-slate-200 border border-slate-300/35";
-}
+  /* ─── Core state ──────────────────────────────────────────── */
+  const [campaign, setCampaign] = useState<CampaignRecord | null>(null);
+  const [contacts, setContacts] = useState<ContactRecord[]>([]);
+  const [runs, setRuns] = useState<CampaignRunSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
-function runStatusClass(status: RunStatus): string {
-  if (status === "completed") {
-    return "bg-emerald-500/20 text-emerald-200 border border-emerald-300/35";
-  }
+  /* ─── Tab ─────────────────────────────────────────────────── */
+  const [activeTab, setActiveTab] = useState<Tab>("contacts");
 
-  if (status === "failed" || status === "stopped") {
-    return "bg-rose-500/20 text-rose-200 border border-rose-300/35";
-  }
+  /* ─── Run ─────────────────────────────────────────────────── */
+  const [runSnapshot, setRunSnapshot] = useState<OutreachRunSnapshot | null>(null);
+  const [startingRun, setStartingRun] = useState(false);
+  const [stoppingRun, setStoppingRun] = useState(false);
 
-  return "bg-sky-500/20 text-sky-200 border border-sky-300/35";
-}
+  /* ─── Activity filter/search ──────────────────────────────── */
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
+  const [searchActivity, setSearchActivity] = useState("");
 
-function bannerClass(tone: StatusTone): string {
-  if (tone === "success") {
-    return "border-emerald-400/40 bg-emerald-500/10 text-emerald-100";
-  }
+  /* ─── Contacts tab search ─────────────────────────────────── */
+  const [searchContacts, setSearchContacts] = useState("");
+  const [deletingContactId, setDeletingContactId] = useState<string | null>(null);
+  const [togglingContactId, setTogglingContactId] = useState<string | null>(null);
+  const [deletingAllContacts, setDeletingAllContacts] = useState(false);
 
-  if (tone === "error") {
-    return "border-rose-400/40 bg-rose-500/10 text-rose-100";
-  }
+  /* ─── Import from list ────────────────────────────────────── */
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [availableLists, setAvailableLists] = useState<ContactList[]>([]);
+  const [importingListId, setImportingListId] = useState<string | null>(null);
 
-  return "border-sky-400/40 bg-sky-500/10 text-sky-100";
-}
+  /* ─── Detail modal ───────────────────────────────────────── */
+  const [selectedDetail, setSelectedDetail] = useState<{
+    contact: ContactRecord;
+    result: { status: string; submitted: string; confirmationMsg: string; captchaStatus: string; contactUrl: string; estCostUsd?: number } | null;
+  } | null>(null);
 
-interface StatCardProps {
-  title: string;
-  value: string;
-  detail: string;
-}
+  /* ─── Logs ────────────────────────────────────────────────── */
+  const [logs, setLogs] = useState<string[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const logsEndRef = React.useRef<HTMLDivElement>(null);
 
-function StatCard({ title, value, detail }: StatCardProps) {
-  return (
-    <div className="glass-panel rounded-2xl p-5">
-      <p className="text-xs uppercase tracking-[0.2em] text-slate-300/70">{title}</p>
-      <p className="mt-2 text-3xl font-semibold text-slate-50">{value}</p>
-      <p className="mt-1 text-sm text-slate-300/80">{detail}</p>
-    </div>
-  );
-}
+  /* ─── Add Steps modal ─────────────────────────────────────── */
+  const [showStepsModal, setShowStepsModal] = useState(false);
+  const [stepsLocal, setStepsLocal] = useState<string[]>([]);
+  const [savingSteps, setSavingSteps] = useState(false);
 
-export default function Page() {
-  const [section, setSection] = useState<MainSection>("overview");
-  const [contactsTab, setContactsTab] = useState<ContactsTab>("companies");
-  const [campaignTab, setCampaignTab] = useState<CampaignTab>("contacts");
+  /* ─── Settings state ──────────────────────────────────────── */
+  const [editName, setEditName] = useState("");
+  const [editStatus, setEditStatus] = useState<CampaignRecord["status"]>("draft");
+  const [editMaxDaily, setEditMaxDaily] = useState(100);
+  const [editAiInstruction, setEditAiInstruction] = useState("");
+  const [editSearchForForm, setEditSearchForForm] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
 
-  const [contacts, setContacts] = useState<ContactRecord[]>(INITIAL_CONTACTS);
-  const [lists, setLists] = useState<ContactListRecord[]>(INITIAL_LISTS);
-  const [campaigns, setCampaigns] = useState<CampaignRecord[]>(INITIAL_CAMPAIGNS);
-  const [selectedCampaignId, setSelectedCampaignId] = useState<string>(INITIAL_CAMPAIGNS[0]?.id ?? "");
-
-  const [banner, setBanner] = useState<BannerState | null>(null);
-
-  const [showAddContactsModal, setShowAddContactsModal] = useState(false);
-  const [addContactsStep, setAddContactsStep] = useState<1 | 2>(1);
-  const [newListName, setNewListName] = useState("");
-  const [csvFeedback, setCsvFeedback] = useState<string>("");
-  const [isParsingCsv, setIsParsingCsv] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const [draftCampaignName, setDraftCampaignName] = useState("");
-  const [draftAiInstruction, setDraftAiInstruction] = useState("");
-  const [queuedListIds, setQueuedListIds] = useState<string[]>([]);
-
-  const [activeRun, setActiveRun] = useState<OutreachRunSnapshot | null>(null);
-  const [activeRunCampaignId, setActiveRunCampaignId] = useState<string | null>(null);
-  const [isStartingRun, setIsStartingRun] = useState(false);
-  const [isStoppingRun, setIsStoppingRun] = useState(false);
-  const snapshotSyncKeyRef = useRef<string>("");
-
-  const showBanner = useCallback((message: string, tone: StatusTone = "info") => {
-    setBanner({ message, tone });
-  }, []);
-
-  const selectedCampaign = useMemo(() => {
-    return campaigns.find((campaign) => campaign.id === selectedCampaignId) ?? null;
-  }, [campaigns, selectedCampaignId]);
-
-  useEffect(() => {
-    if (campaigns.length === 0) {
-      setSelectedCampaignId("");
-      return;
+  /* ─── Contact results map ─────────────────────────────────── */
+  const contactResultsMap = useMemo(() => {
+    const map = new Map<string, { status: string; submitted: string; confirmationMsg: string; captchaStatus: string; contactUrl: string }>();
+    if (!runSnapshot?.results) return map;
+    for (const res of runSnapshot.results) {
+      const nUrl = normUrl(res.contactUrl);
+      const rawName = (res.companyName || "").toLowerCase().trim();
+      const nName = ["unknown", "n/a", "null", "undefined", ""].includes(rawName) ? "" : rawName;
+      const payload = { status: res.status, submitted: res.submitted, confirmationMsg: res.confirmationMsg, captchaStatus: res.captchaStatus, contactUrl: res.contactUrl };
+      if (nUrl) map.set(`url:${nUrl}`, payload);
+      if (nName) map.set(`name:${nName}`, payload);
     }
+    return map;
+  }, [runSnapshot]);
 
-    if (selectedCampaignId === "") {
-      return;
+  const getContactResult = useCallback((contact: ContactRecord) => {
+    const nUrl = normUrl(contact.contactUrl);
+    const rawName = (contact.companyName || "").toLowerCase().trim();
+    const nName = ["unknown", "n/a", "null", "undefined", ""].includes(rawName) ? "" : rawName;
+    return (nUrl ? contactResultsMap.get(`url:${nUrl}`) : null) || (nName ? contactResultsMap.get(`name:${nName}`) : null) || null;
+  }, [contactResultsMap]);
+
+  /* ─── Stats ───────────────────────────────────────────────── */
+  const stats = useMemo(() => {
+    let success = 0, fail = 0, warning = 0, pending = 0;
+    for (const c of contacts) {
+      const r = getContactResult(c);
+      if (!r) pending++;
+      else if (r.status === "success") success++;
+      else if (r.status === "fail") fail++;
+      else if (r.status === "warning") warning++;
+      else pending++;
     }
+    return { total: contacts.length, success, fail, warning, pending };
+  }, [contacts, getContactResult]);
 
-    if (!campaigns.some((campaign) => campaign.id === selectedCampaignId)) {
-      setSelectedCampaignId(campaigns[0].id);
-    }
-  }, [campaigns, selectedCampaignId]);
-
-  const getContactsForCampaign = useCallback(
-    (campaign: CampaignRecord): ContactRecord[] => {
-      const listIdSet = new Set(campaign.listIds);
-      return contacts.filter((contact) => contact.listIds.some((listId) => listIdSet.has(listId)));
-    },
-    [contacts],
-  );
-
-  const selectedCampaignContacts = useMemo(() => {
-    if (!selectedCampaign) {
-      return [] as ContactRecord[];
-    }
-
-    return getContactsForCampaign(selectedCampaign);
-  }, [getContactsForCampaign, selectedCampaign]);
-
-  const listCards = useMemo(() => {
-    return lists.map((list) => {
-      const listContacts = contacts.filter((contact) => list.contactIds.includes(contact.id));
-      const submitted = listContacts.filter((contact) => contact.status === "submitted").length;
-      const failed = listContacts.filter((contact) => contact.status === "failed").length;
-
-      return {
-        ...list,
-        total: listContacts.length,
-        submitted,
-        failed,
-        completion: formatPercent(submitted + failed, listContacts.length),
-      };
+  /* ─── Filtered activity rows ──────────────────────────────── */
+  const activityRows = useMemo(() => {
+    return contacts.filter((c) => {
+      const r = getContactResult(c);
+      const matchesFilter =
+        filterMode === "all" ? true :
+          filterMode === "pending" ? !r :
+            r?.status === filterMode;
+      const search = searchActivity.trim().toLowerCase();
+      const matchesSearch = !search ||
+        c.companyName.toLowerCase().includes(search) ||
+        c.contactUrl.toLowerCase().includes(search);
+      return matchesFilter && matchesSearch;
     });
-  }, [contacts, lists]);
+  }, [contacts, filterMode, searchActivity, getContactResult]);
 
-  const totalSubmitted = useMemo(
-    () => contacts.filter((contact) => contact.status === "submitted").length,
-    [contacts],
-  );
+  /* ─── Filtered contact rows ───────────────────────────────── */
+  const filteredContacts = useMemo(() => {
+    const s = searchContacts.trim().toLowerCase();
+    if (!s) return contacts;
+    return contacts.filter(c =>
+      c.companyName.toLowerCase().includes(s) ||
+      c.contactUrl.toLowerCase().includes(s) ||
+      (c.domain || "").toLowerCase().includes(s)
+    );
+  }, [contacts, searchContacts]);
 
-  const totalFailed = useMemo(
-    () => contacts.filter((contact) => contact.status === "failed").length,
-    [contacts],
-  );
-
-  const totalRuns = useMemo(
-    () => campaigns.reduce((sum, campaign) => sum + campaign.runSummaries.length, 0),
-    [campaigns],
-  );
-
-  const submissionRate = formatPercent(totalSubmitted, contacts.length);
-
-  const isRunActive = activeRun?.status === "running" || activeRun?.status === "queued";
-  const canStopRun = Boolean(isRunActive && activeRun);
-
-  const syncSnapshotToUi = useCallback(
-    (snapshot: OutreachRunSnapshot, campaignId: string) => {
-      const summary = toRunSummary(snapshot);
-
-      setCampaigns((previous) => {
-        return previous.map((campaign) => {
-          if (campaign.id !== campaignId) {
-            return campaign;
-          }
-
-          const otherRuns = campaign.runSummaries.filter((run) => run.runId !== summary.runId);
-          return {
-            ...campaign,
-            lastRunId: summary.runId,
-            runSummaries: [summary, ...otherRuns],
-          };
-        });
-      });
-
-      if (snapshot.results.length === 0) {
-        return;
-      }
-
-      const resultsByUrl = new Map<string, RunResultRow>();
-
-      for (const result of snapshot.results) {
-        const key = normalizeUrlKey(result.contactUrl);
-        if (!key) {
-          continue;
-        }
-
-        resultsByUrl.set(key, result);
-      }
-
-      setContacts((previous) => {
-        return previous.map((contact) => {
-          const result = resultsByUrl.get(normalizeUrlKey(contact.contactUrl));
-          if (!result) {
-            return contact;
-          }
-
-          return {
-            ...contact,
-            status: resultToContactStatus(result),
-            lastUpdatedAt: new Date().toISOString(),
-            lastResult: {
-              status: resultToContactStatus(result),
-              confirmation: result.confirmationMsg,
-              captchaStatus: result.captchaStatus,
-              costUsd: result.estCostUsd,
-            },
-          };
-        });
-      });
-    },
-    [setCampaigns, setContacts],
-  );
-
-  useEffect(() => {
-    if (!activeRun || !activeRunCampaignId) {
-      return;
-    }
-
-    const snapshotKey = `${activeRun.runId}:${activeRun.status}:${activeRun.results.length}:${activeRun.logs.length}:${activeRun.progress}`;
-
-    if (snapshotSyncKeyRef.current === snapshotKey) {
-      return;
-    }
-
-    snapshotSyncKeyRef.current = snapshotKey;
-    syncSnapshotToUi(activeRun, activeRunCampaignId);
-
-    if (activeRun.status === "completed") {
-      showBanner(
-        `Run completed. Processed ${activeRun.processedLeads}/${activeRun.totalLeads} contacts with ${activeRun.duplicatesSkipped} duplicate(s) skipped.`,
-        "success",
-      );
-    }
-
-    if (activeRun.status === "failed") {
-      showBanner(activeRun.error ?? "Run failed. Please check campaign logs.", "error");
-    }
-
-    if (activeRun.status === "stopped") {
-      showBanner("Run stopped by operator.", "info");
-    }
-  }, [activeRun, activeRunCampaignId, showBanner, syncSnapshotToUi]);
-
-  useEffect(() => {
-    if (!activeRun || (activeRun.status !== "running" && activeRun.status !== "queued")) {
-      return;
-    }
-
-    const currentRunId = activeRun.runId;
-    const timer = window.setInterval(async () => {
-      try {
-        const response = await fetch(`/api/outreach/run?runId=${encodeURIComponent(currentRunId)}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          if (response.status === 404) {
-            snapshotSyncKeyRef.current = "";
-            setActiveRun(null);
-            setActiveRunCampaignId(null);
-            showBanner("Run state was reset on backend. Local run state was cleared.", "info");
-          }
-          return;
-        }
-
-        const snapshot = (await response.json()) as OutreachRunSnapshot;
-        setActiveRun(snapshot);
-      } catch {
-        // Silent retry on next poll.
-      }
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [activeRun, showBanner]);
-
-  const startCampaignRun = useCallback(
-    async (campaign: CampaignRecord) => {
-      if (isRunActive) {
-        showBanner("Another run is already active. Stop it before starting a new run.", "error");
-        return;
-      }
-
-      const campaignContacts = getContactsForCampaign(campaign);
-      if (campaignContacts.length === 0) {
-        showBanner("This campaign has no contacts. Attach at least one list first.", "error");
-        return;
-      }
-
-      setIsStartingRun(true);
-      snapshotSyncKeyRef.current = "";
-
-      try {
-        const leads = campaignContacts.map((contact) => ({
-          companyName: contact.companyName,
-          contactUrl: contact.contactUrl,
-        }));
-
-        const response = await fetch("/api/outreach/run", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            persona: {
-              id: campaign.id,
-              title: campaign.name,
-              aiInstruction: campaign.aiInstruction,
-              maxDailySubmissions: campaign.maxDailySubmissions,
-            },
-            leads,
-          }),
-        });
-
-        const payload = (await response.json().catch(() => null)) as
-          | (Partial<OutreachRunSnapshot> & { error?: string; runId?: string; code?: string })
-          | null;
-
-        if (!response.ok) {
-          if (response.status === 409 && payload?.runId) {
-            const running = await fetch(`/api/outreach/run?runId=${encodeURIComponent(payload.runId)}`, {
-              method: "GET",
-              cache: "no-store",
-            });
-
-            if (running.ok) {
-              const snapshot = (await running.json()) as OutreachRunSnapshot;
-              setActiveRun(snapshot);
-            }
-          }
-
-          showBanner(payload?.error ?? "Unable to start campaign run.", "error");
-          return;
-        }
-
-        const snapshot = payload as OutreachRunSnapshot;
-        setActiveRun(snapshot);
-        setActiveRunCampaignId(campaign.id);
-        setSelectedCampaignId(campaign.id);
-        setCampaignTab("logs");
-        setSection("campaigns");
-
-        showBanner(`Campaign "${campaign.name}" started for ${leads.length} contacts.`, "success");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to start campaign.";
-        showBanner(message, "error");
-      } finally {
-        setIsStartingRun(false);
-      }
-    },
-    [getContactsForCampaign, isRunActive, showBanner],
-  );
-
-  const stopCampaignRun = useCallback(async () => {
-    if (!activeRun) {
-      return;
-    }
-
-    setIsStoppingRun(true);
-
+  /* ─── Load bundle ─────────────────────────────────────────── */
+  const loadCampaignBundle = useCallback(async () => {
+    setLoading(true);
+    setError("");
     try {
-      const response = await fetch("/api/outreach/run/stop", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ runId: activeRun.runId }),
-      });
+      const [cRes, coRes, rRes] = await Promise.all([
+        fetch(`/api/campaigns/${campaignId}`, { cache: "no-store" }),
+        fetch(`/api/campaigns/${campaignId}/contacts`, { cache: "no-store" }),
+        fetch(`/api/campaigns/${campaignId}/runs?limit=50`, { cache: "no-store" }),
+      ]);
+      const cPayload = await cRes.json() as CampaignRecord | { error?: string };
+      const coPayload = await coRes.json() as CampaignContactsResponse | { error?: string };
+      const rPayload = await rRes.json() as CampaignRunsResponse | { error?: string };
 
-      const payload = (await response.json().catch(() => null)) as
-        | (OutreachRunSnapshot & { error?: string })
-        | null;
-
-      if (!response.ok || !payload) {
-        showBanner(payload?.error ?? "Unable to stop run.", "error");
+      if (!cRes.ok || !coRes.ok || !rRes.ok) {
+        setError(("error" in cPayload && cPayload.error) || ("error" in coPayload && coPayload.error) || "Unable to load campaign.");
         return;
       }
-
-      setActiveRun(payload);
-      showBanner("Run stop request submitted.", "info");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to stop run.";
-      showBanner(message, "error");
+      const cData = cPayload as CampaignRecord;
+      const coData = coPayload as CampaignContactsResponse;
+      const rData = rPayload as CampaignRunsResponse;
+      setCampaign(cData);
+      setContacts(coData.contacts ?? []);
+      setRuns(rData.runs ?? []);
+      setEditName(cData.name);
+      setEditStatus(cData.status);
+      setEditMaxDaily(cData.maxDailySubmissions);
+      setEditAiInstruction(cData.aiInstruction || "");
+      setEditSearchForForm(cData.searchForForm || false);
+      setStepsLocal(cData.steps || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load campaign.");
     } finally {
-      setIsStoppingRun(false);
+      setLoading(false);
     }
-  }, [activeRun, showBanner]);
+  }, [campaignId]);
 
-  const handleCreateCampaign = useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-
-      const name = draftCampaignName.trim();
-      const instruction = draftAiInstruction.trim();
-
-      if (!name) {
-        showBanner("Campaign name is required.", "error");
-        return;
+  /* ─── Fetch logs ───────────────────────────────────────────── */
+  const fetchLogs = useCallback(async () => {
+    setLogsLoading(true);
+    try {
+      const runId = runSnapshot?.runId;
+      const url = runId ? `/api/outreach/logs?tail=300&run_id=${encodeURIComponent(runId)}` : `/api/outreach/logs?tail=300`;
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json() as { lines?: string[] };
+        setLogs(data.lines ?? []);
+        setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
       }
+    } catch { /* ignore */ }
+    finally { setLogsLoading(false); }
+  }, [runSnapshot?.runId]);
 
-      if (!instruction) {
-        showBanner("AI instruction is required.", "error");
-        return;
+  useEffect(() => {
+    if (!showLogs) return;
+    void fetchLogs();
+    if (!runSnapshot || !isActiveRun(runSnapshot.status)) return;
+    const timer = globalThis.setInterval(() => { void fetchLogs(); }, 3000);
+    return () => globalThis.clearInterval(timer);
+  }, [showLogs, fetchLogs, runSnapshot]);
+
+  useEffect(() => { void loadCampaignBundle(); }, [loadCampaignBundle]);
+
+  /* ─── Restore run snapshot ────────────────────────────────── */
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(`run-snapshot-${campaignId}`);
+      if (saved) {
+        const snap = JSON.parse(saved) as OutreachRunSnapshot;
+        if (snap?.runId) setRunSnapshot(snap);
       }
+    } catch { /* ignore */ }
+  }, [campaignId]);
 
-      const campaign: CampaignRecord = {
-        id: createId("campaign"),
-        name,
-        aiInstruction: instruction,
-        maxDailySubmissions: 100,
-        listIds: queuedListIds,
-        createdAt: new Date().toISOString(),
-        steps: DEFAULT_RETARGET_STEPS.map((step) => ({ ...step })),
-        runSummaries: [],
+  useEffect(() => {
+    if (!runSnapshot) return;
+    try { localStorage.setItem(`run-snapshot-${campaignId}`, JSON.stringify(runSnapshot)); }
+    catch { /* ignore */ }
+  }, [runSnapshot, campaignId]);
+
+  /* ─── Poll active run ─────────────────────────────────────── */
+  useEffect(() => {
+    if (!runSnapshot || !isActiveRun(runSnapshot.status)) return;
+    const timer = globalThis.setInterval(async () => {
+      try {
+        const res = await fetch(`/api/outreach/run?runId=${encodeURIComponent(runSnapshot.runId)}`, { cache: "no-store" });
+        const payload = await res.json() as OutreachRunSnapshot | { error?: string };
+        if (!res.ok || !("runId" in payload)) return;
+        setRunSnapshot(payload);
+        if (!isActiveRun(payload.status)) void loadCampaignBundle();
+      } catch { /* keep stable */ }
+    }, RUN_POLL_INTERVAL_MS);
+    return () => globalThis.clearInterval(timer);
+  }, [loadCampaignBundle, runSnapshot]);
+
+  /* ─── Actions ─────────────────────────────────────────────── */
+  const startRun = useCallback(async () => {
+    if (!campaign) return;
+    if (contacts.length === 0) { setMessage("Add contacts before starting a run."); return; }
+    setStartingRun(true);
+    setMessage("");
+    try {
+      const res = await fetch("/api/outreach/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resume: true,
+          persona: { id: campaign.id, title: campaign.name, aiInstruction: campaign.aiInstruction, maxDailySubmissions: campaign.maxDailySubmissions },
+          leads: contacts.map(c => ({ companyName: c.companyName, contactUrl: c.contactUrl })),
+        }),
+      });
+      const payload = await res.json() as OutreachRunSnapshot | { error?: string };
+      if (!res.ok || !("runId" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to start run."); return; }
+      setRunSnapshot(payload);
+      setMessage(`Run ${payload.runId} started.`);
+      setActiveTab("activity");
+      await loadCampaignBundle();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to start run.");
+    } finally { setStartingRun(false); }
+  }, [campaign, contacts, loadCampaignBundle]);
+
+  const stopRun = useCallback(async () => {
+    if (!runSnapshot) return;
+    setStoppingRun(true);
+    setMessage("");
+    try {
+      const res = await fetch("/api/outreach/run/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: runSnapshot.runId }),
+      });
+      const payload = await res.json() as OutreachRunSnapshot | { error?: string };
+      if (!res.ok || !("runId" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to stop run."); return; }
+      setRunSnapshot(payload);
+      setMessage(`Stopped run ${payload.runId}.`);
+      await loadCampaignBundle();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to stop run.");
+    } finally { setStoppingRun(false); }
+  }, [loadCampaignBundle, runSnapshot]);
+
+  const deleteContact = useCallback(async (contactId: string) => {
+    setDeletingContactId(contactId);
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/contacts/${contactId}`, { method: "DELETE" });
+      const payload = await res.json() as { error?: string };
+      if (!res.ok) { setMessage(payload.error || "Unable to delete."); return; }
+      setContacts(prev => prev.filter(c => c.id !== contactId));
+      setCampaign(prev => prev ? { ...prev, contactCount: Math.max(0, prev.contactCount - 1) } : prev);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to delete.");
+    } finally { setDeletingContactId(null); }
+  }, [campaignId]);
+
+  const deleteAllContacts = useCallback(async () => {
+    if (!confirm("Are you sure you want to delete ALL contacts in this campaign? This cannot be undone.")) return;
+    setDeletingAllContacts(true);
+    setMessage("");
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/contacts`, { method: "DELETE" });
+      const payload = await res.json() as { error?: string };
+      if (!res.ok) { setMessage(payload.error || "Unable to delete all contacts."); return; }
+      setContacts([]);
+      setCampaign(prev => prev ? { ...prev, contactCount: 0 } : prev);
+      setMessage("Successfully deleted all contacts.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to delete all contacts.");
+    } finally { setDeletingAllContacts(false); }
+  }, [campaignId]);
+
+  const toggleInterested = useCallback(async (contact: ContactRecord) => {
+    setTogglingContactId(contact.id);
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/contacts/${contact.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isInterested: !contact.isInterested }),
+      });
+      const payload = await res.json() as ContactRecord | { error?: string };
+      if (!res.ok || !("id" in payload)) { setMessage(("error" in payload && payload.error) || "Update failed."); return; }
+      setContacts(prev => prev.map(c => c.id === contact.id ? { ...c, isInterested: !c.isInterested } : c));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Update failed.");
+    } finally { setTogglingContactId(null); }
+  }, [campaignId]);
+
+  const importFromList = useCallback(async (list: ContactList) => {
+    setImportingListId(list.id);
+    setMessage("");
+    try {
+      const payload = {
+        contacts: list.contacts.map(item => ({
+          companyName: item.companyName || "Unknown",
+          contactUrl: item.contactUrl
+        }))
       };
 
-      setCampaigns((previous) => [campaign, ...previous]);
-      setSelectedCampaignId(campaign.id);
-      setSection("campaigns");
-      setCampaignTab("contacts");
-      setDraftCampaignName("");
-      setDraftAiInstruction("");
-      setQueuedListIds([]);
-
-      showBanner(`Campaign "${campaign.name}" created successfully.`, "success");
-    },
-    [draftAiInstruction, draftCampaignName, queuedListIds, showBanner],
-  );
-
-  const toggleCampaignList = useCallback((campaignId: string, listId: string) => {
-    setCampaigns((previous) => {
-      return previous.map((campaign) => {
-        if (campaign.id !== campaignId) {
-          return campaign;
-        }
-
-        const hasList = campaign.listIds.includes(listId);
-        return {
-          ...campaign,
-          listIds: hasList
-            ? campaign.listIds.filter((id) => id !== listId)
-            : [...campaign.listIds, listId],
-        };
-      });
-    });
-  }, []);
-
-  const toggleRetargetStep = useCallback((campaignId: string, stepId: string) => {
-    setCampaigns((previous) => {
-      return previous.map((campaign) => {
-        if (campaign.id !== campaignId) {
-          return campaign;
-        }
-
-        return {
-          ...campaign,
-          steps: campaign.steps.map((step) => {
-            if (step.id !== stepId) {
-              return step;
-            }
-
-            return {
-              ...step,
-              enabled: !step.enabled,
-            };
-          }),
-        };
-      });
-    });
-  }, []);
-
-  const updateRetargetStepDelay = useCallback((campaignId: string, stepId: string, rawValue: string) => {
-    const nextDelay = clampPositiveInt(rawValue, 1);
-
-    setCampaigns((previous) => {
-      return previous.map((campaign) => {
-        if (campaign.id !== campaignId) {
-          return campaign;
-        }
-
-        return {
-          ...campaign,
-          steps: campaign.steps.map((step) => {
-            if (step.id !== stepId) {
-              return step;
-            }
-
-            return {
-              ...step,
-              daysAfter: nextDelay,
-            };
-          }),
-        };
-      });
-    });
-  }, []);
-
-  const updateCampaignDailyLimit = useCallback((campaignId: string, rawValue: string) => {
-    const next = clampPositiveInt(rawValue, 1);
-
-    setCampaigns((previous) => {
-      return previous.map((campaign) => {
-        if (campaign.id !== campaignId) {
-          return campaign;
-        }
-
-        return {
-          ...campaign,
-          maxDailySubmissions: next,
-        };
-      });
-    });
-  }, []);
-
-  const enqueueListForNextCampaign = useCallback(
-    (listId: string) => {
-      setQueuedListIds((previous) => {
-        if (previous.includes(listId)) {
-          return previous;
-        }
-        return [...previous, listId];
+      const res = await fetch(`/api/campaigns/${campaignId}/contacts/bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       });
 
-      setSection("campaigns");
-      showBanner("List added to campaign creation queue.", "info");
-    },
-    [showBanner],
-  );
+      if (!res.ok) throw new Error("Bulk import failed returned " + res.status);
 
-  const removeQueuedList = useCallback((listId: string) => {
-    setQueuedListIds((previous) => previous.filter((id) => id !== listId));
-  }, []);
+      setMessage(`Successfully imported ${list.contacts.length} contacts from "${list.name}".`);
+      setShowImportModal(false);
+      await loadCampaignBundle();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Import failed.");
+    } finally { setImportingListId(null); }
+  }, [campaignId, loadCampaignBundle]);
 
-  const clearSelectedCampaign = useCallback(() => {
-    setSelectedCampaignId("");
-    setCampaignTab("contacts");
-  }, []);
-
-  const deleteContact = useCallback(
-    (contactId: string) => {
-      const contact = contacts.find((item) => item.id === contactId);
-      if (!contact) {
-        return;
-      }
-
-      if (!window.confirm(`Delete company \"${contact.companyName}\"?`)) {
-        return;
-      }
-
-      setContacts((previous) => previous.filter((item) => item.id !== contactId));
-      setLists((previous) =>
-        previous.map((list) => ({
-          ...list,
-          contactIds: list.contactIds.filter((id) => id !== contactId),
-        })),
-      );
-      showBanner(`Company \"${contact.companyName}\" deleted.`, "info");
-    },
-    [contacts, showBanner],
-  );
-
-  const deleteList = useCallback(
-    (listId: string) => {
-      const list = lists.find((item) => item.id === listId);
-      if (!list) {
-        return;
-      }
-
-      if (!window.confirm(`Delete list \"${list.name}\"?`)) {
-        return;
-      }
-
-      setLists((previous) => previous.filter((item) => item.id !== listId));
-      setContacts((previous) =>
-        previous.map((contact) => ({
-          ...contact,
-          listIds: contact.listIds.filter((id) => id !== listId),
-        })),
-      );
-      setCampaigns((previous) =>
-        previous.map((campaign) => ({
-          ...campaign,
-          listIds: campaign.listIds.filter((id) => id !== listId),
-        })),
-      );
-      setQueuedListIds((previous) => previous.filter((id) => id !== listId));
-      showBanner(`List \"${list.name}\" deleted.`, "info");
-    },
-    [lists, showBanner],
-  );
-
-  const deleteCampaign = useCallback(
-    (campaignId: string) => {
-      const campaign = campaigns.find((item) => item.id === campaignId);
-      if (!campaign) {
-        return;
-      }
-
-      if (isRunActive && activeRunCampaignId === campaignId) {
-        showBanner("Stop the active run before deleting this campaign.", "error");
-        return;
-      }
-
-      if (!window.confirm(`Delete campaign \"${campaign.name}\"?`)) {
-        return;
-      }
-
-      setCampaigns((previous) => previous.filter((item) => item.id !== campaignId));
-      setSelectedCampaignId((previous) => (previous === campaignId ? "" : previous));
-
-      if (activeRunCampaignId === campaignId && !isRunActive) {
-        setActiveRunCampaignId(null);
-      }
-
-      showBanner(`Campaign \"${campaign.name}\" deleted.`, "info");
-    },
-    [activeRunCampaignId, campaigns, isRunActive, showBanner],
-  );
-
-  const downloadCsvTemplate = useCallback(() => {
-    const csv = [
-      "Company Name,Website URL,Location,Industry,Employee Size,Contact Form URL",
-      "Acme Labs,https://acmelabs.com,San Francisco US,SaaS,51-200,https://acmelabs.com/contact",
-    ].join("\n");
-
-    const blob = new Blob([`${csv}\n`], { type: "text/csv;charset=utf-8" });
-    const downloadUrl = URL.createObjectURL(blob);
-
-    const anchor = document.createElement("a");
-    anchor.href = downloadUrl;
-    anchor.download = CSV_TEMPLATE_FILE_NAME;
-    anchor.click();
-
-    URL.revokeObjectURL(downloadUrl);
-  }, []);
-
-  const openAddContactsModal = useCallback(() => {
-    setShowAddContactsModal(true);
-    setAddContactsStep(1);
-    setNewListName("");
-    setCsvFeedback("");
-    setIsParsingCsv(false);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  }, []);
-
-  const closeAddContactsModal = useCallback(() => {
-    setShowAddContactsModal(false);
-    setAddContactsStep(1);
-    setNewListName("");
-    setCsvFeedback("");
-    setIsParsingCsv(false);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  }, []);
-
-  const handleNextAddContactsStep = useCallback(() => {
-    if (!newListName.trim()) {
-      setCsvFeedback("Please enter a list name before uploading CSV.");
-      return;
-    }
-
-    setCsvFeedback("");
-    setAddContactsStep(2);
-  }, [newListName]);
-
-  const handleCsvUpload = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (!file) {
-        return;
-      }
-
-      const trimmedListName = newListName.trim();
-      if (!trimmedListName) {
-        setCsvFeedback("List name is missing. Go back to step 1 and enter list name.");
-        setAddContactsStep(1);
-        return;
-      }
-
-      setIsParsingCsv(true);
-      setCsvFeedback("Reading CSV and validating duplicates...");
-
-      Papa.parse<Record<string, string>>(file, {
-        header: true,
-        skipEmptyLines: "greedy",
-        complete: (results) => {
-          const rows = results.data ?? [];
-          const existingKeys = new Set(contacts.map((contact) => normalizeUrlKey(contact.contactUrl)));
-          const inBatch = new Set<string>();
-
-          const incomingContacts: ContactRecord[] = [];
-          let duplicateCount = 0;
-          let invalidCount = 0;
-
-          for (const row of rows) {
-            const companyName = pickCsvValue(row, [
-              "company name",
-              "company",
-              "company_name",
-              "name",
-            ]);
-
-            const contactUrl = pickCsvValue(row, [
-              "contact form url",
-              "contact url found",
-              "contact url",
-              "url",
-              "contact_url",
-            ]);
-
-            if (!companyName || !contactUrl) {
-              invalidCount += 1;
-              continue;
-            }
-
-            const normalizedUrl = normalizeUrlKey(contactUrl);
-            if (!normalizedUrl) {
-              invalidCount += 1;
-              continue;
-            }
-
-            if (existingKeys.has(normalizedUrl) || inBatch.has(normalizedUrl)) {
-              duplicateCount += 1;
-              continue;
-            }
-
-            inBatch.add(normalizedUrl);
-
-            const website = pickCsvValue(row, ["website url", "website", "domain"]);
-            const location = pickCsvValue(row, ["location", "city", "country"]) || "Unknown";
-            const industry = pickCsvValue(row, ["industry", "category", "vertical"]) || "Unknown";
-            const employeeSize = pickCsvValue(row, ["employee size", "employees", "team size"]) || "n/a";
-
-            incomingContacts.push({
-              id: createId("contact"),
-              companyName,
-              domain: website ? getDomainFromUrl(website) : getDomainFromUrl(contactUrl),
-              location,
-              industry,
-              employeeSize,
-              contactUrl: ensureProtocol(contactUrl),
-              listIds: [],
-              status: "ready",
-              lastUpdatedAt: new Date().toISOString(),
-            });
-          }
-
-          if (incomingContacts.length === 0) {
-            setCsvFeedback(
-              `No contacts imported. Duplicates skipped: ${duplicateCount}. Invalid rows: ${invalidCount}.`,
-            );
-            setIsParsingCsv(false);
-            return;
-          }
-
-          const listId = createId("list");
-          const createdAt = new Date().toISOString();
-          const listContactIds = incomingContacts.map((contact) => contact.id);
-          const contactsWithList = incomingContacts.map((contact) => ({
-            ...contact,
-            listIds: [listId],
-          }));
-
-          setContacts((previous) => [...contactsWithList, ...previous]);
-          setLists((previous) => [
-            {
-              id: listId,
-              name: trimmedListName,
-              createdAt,
-              contactIds: listContactIds,
-            },
-            ...previous,
-          ]);
-
-          setQueuedListIds((previous) => {
-            if (previous.includes(listId)) {
-              return previous;
-            }
-            return [...previous, listId];
-          });
-
-          setIsParsingCsv(false);
-          setCsvFeedback(
-            `Imported ${incomingContacts.length} contacts. Duplicates skipped: ${duplicateCount}. Invalid rows: ${invalidCount}.`,
-          );
-
-          showBanner(`List "${trimmedListName}" added with ${incomingContacts.length} contacts.`, "success");
-
-          setContactsTab("lists");
-          setSection("contacts");
-          closeAddContactsModal();
-        },
-        error: (error) => {
-          setCsvFeedback(`CSV parse failed: ${error.message}`);
-          setIsParsingCsv(false);
-        },
+  const saveSettings = useCallback(async () => {
+    if (!campaign) return;
+    if (!editName.trim()) { setMessage("Campaign name is required."); return; }
+    setSavingSettings(true);
+    setMessage("");
+    try {
+      const res = await fetch(`/api/campaigns/${campaign.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editName.trim(),
+          status: editStatus,
+          maxDailySubmissions: Math.max(1, Math.round(editMaxDaily || 1)),
+          aiInstruction: editAiInstruction,
+          searchForForm: editSearchForForm,
+          steps: stepsLocal,
+        }),
       });
-    },
-    [closeAddContactsModal, contacts, newListName, showBanner],
-  );
+      const payload = await res.json() as CampaignRecord | { error?: string };
+      if (!res.ok || !("id" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to update."); return; }
+      setCampaign(payload);
+      setMessage("Settings saved successfully.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to update.");
+    } finally { setSavingSettings(false); }
+  }, [campaign, editName, editStatus, editMaxDaily, editAiInstruction, editSearchForForm, stepsLocal]);
 
-  const selectedCampaignRun =
-    selectedCampaign && activeRunCampaignId === selectedCampaign.id ? activeRun : null;
-  const selectedCampaignLatestRun = selectedCampaign?.runSummaries[0] ?? null;
+  const saveSteps = useCallback(async () => {
+    if (!campaign) return;
+    setSavingSteps(true);
+    try {
+      const res = await fetch(`/api/campaigns/${campaign.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ steps: stepsLocal }),
+      });
+      const payload = await res.json() as CampaignRecord | { error?: string };
+      if (!res.ok || !("id" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to save steps."); return; }
+      setCampaign(payload);
+      setStepsLocal(payload.steps || []);
+      setShowStepsModal(false);
+      setMessage("Steps saved.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to save steps.");
+    } finally { setSavingSteps(false); }
+  }, [campaign, stepsLocal]);
+
+  const exportResultsToCsv = useCallback(() => {
+    if (!runSnapshot?.results?.length) { alert("No results to export."); return; }
+    const headers = ["Company", "Contact URL", "Status", "Captcha Status", "Submitted", "Form Found", "Confirmation"];
+    const rows = runSnapshot.results.map(r => [
+      `"${(r.companyName || "").replace(/"/g, '""')}"`,
+      `"${(r.contactUrl || "").replace(/"/g, '""')}"`,
+      `"${r.status || ""}"`,
+      `"${(r.captchaStatus || "").replace(/"/g, '""')}"`,
+      `"${r.submitted || ""}"`,
+      `"${(r.captchaStatus || "").toLowerCase().includes("found") ? "Yes" : "No"}"`,
+      `"${(r.confirmationMsg || "").replace(/"/g, '""')}"`,
+    ]);
+    const csv = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+    const link = document.createElement("a");
+    link.href = encodeURI(csv);
+    link.download = `run-${runSnapshot.runId}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [runSnapshot]);
+
+  if (loading) return <p className="panel-muted" style={{ padding: "2rem" }}>Loading campaign...</p>;
+  if (error || !campaign) return <p className="panel-error" style={{ padding: "2rem" }}>{error || "Campaign not found."}</p>;
+
+  const runActive = !!runSnapshot && isActiveRun(runSnapshot.status);
 
   return (
-    <div className="nebula-shell min-h-screen">
-      <div className="relative z-10 mx-auto w-full max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
-        <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="sidebar-float p-4 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
-            <div className="rounded-2xl border border-slate-400/20 bg-slate-900/45 p-4">
-              <p className="text-xs uppercase tracking-[0.22em] text-slate-300/70">Automation Hub</p>
-              <p className="mt-2 text-lg font-semibold text-slate-50">Outreach Workspace</p>
-              <p className="mt-1 text-sm text-slate-300/80">Contacts and campaigns in one control room.</p>
-            </div>
-
-            <nav className="mt-4 space-y-2">
-              {[
-                {
-                  id: "overview" as const,
-                  label: "Overview",
-                  icon: Activity,
-                },
-                {
-                  id: "contacts" as const,
-                  label: "Contacts",
-                  icon: Users,
-                },
-                {
-                  id: "campaigns" as const,
-                  label: "Campaigns",
-                  icon: FolderKanban,
-                },
-              ].map((item) => {
-                const active = section === item.id;
-
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setSection(item.id)}
-                    className={`flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left transition ${
-                      active
-                        ? "border-sky-300/55 bg-sky-500/15 text-sky-100"
-                        : "border-slate-400/20 bg-slate-900/35 text-slate-300 hover:border-slate-300/35 hover:bg-slate-900/55"
-                    }`}
-                  >
-                    <item.icon className="h-4 w-4" />
-                    <span className="text-sm font-medium">{item.label}</span>
-                  </button>
-                );
-              })}
-            </nav>
-
-            <div className="mt-6 rounded-2xl border border-slate-400/20 bg-slate-900/45 p-4">
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-300/70">Run Status</p>
-              <div className="mt-3 flex items-center gap-2">
-                <span className={isRunActive ? "breathing-dot" : "h-2 w-2 rounded-full bg-slate-500/70"} />
-                <span className="text-sm text-slate-200">
-                  {isRunActive ? "Active backend run in progress" : "No active run"}
-                </span>
-              </div>
-              {activeRun ? (
-                <p className="mt-3 text-xs text-slate-300/80">
-                  {activeRun.processedLeads}/{activeRun.totalLeads} processed, duplicates skipped: {" "}
-                  {activeRun.duplicatesSkipped}
-                </p>
-              ) : null}
-            </div>
-          </aside>
-
-          <main className="space-y-6">
-            <header className="glass-panel rounded-2xl px-5 py-4 sm:px-6 sm:py-5">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.22em] text-slate-300/75">Lead Engine</p>
-                  <h1 className="mt-1 text-2xl font-semibold text-slate-50 sm:text-3xl">
-                    {section === "overview" && "Performance Overview"}
-                    {section === "contacts" && "Contacts and Lists"}
-                    {section === "campaigns" && "Campaign Control"}
-                  </h1>
-                  <p className="mt-1 text-sm text-slate-300/85">
-                    {section === "overview" &&
-                      "Monitor submissions, duplicate prevention, and CAPTCHA-credit usage across campaigns."}
-                    {section === "contacts" &&
-                      "Manage companies and list uploads. Add contacts using a list name + CSV flow."}
-                    {section === "campaigns" &&
-                      "Create simple campaigns and manage contacts, retarget steps, settings, and logs."}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  {section === "contacts" ? (
-                    <button
-                      type="button"
-                      onClick={openAddContactsModal}
-                      className="inline-flex items-center gap-2 rounded-xl border border-sky-300/55 bg-sky-500/20 px-3 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-500/30"
-                    >
-                      <Plus className="h-4 w-4" />
-                      Add Contacts
-                    </button>
-                  ) : null}
-
-                  {section === "campaigns" && selectedCampaign ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void startCampaignRun(selectedCampaign)}
-                        disabled={isStartingRun || isRunActive}
-                        className="inline-flex items-center gap-2 rounded-xl border border-emerald-300/55 bg-emerald-500/20 px-3 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {isStartingRun ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Play className="h-4 w-4" />
-                        )}
-                        Start Campaign
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => void stopCampaignRun()}
-                        disabled={!canStopRun || isStoppingRun}
-                        className="inline-flex items-center gap-2 rounded-xl border border-rose-300/55 bg-rose-500/20 px-3 py-2 text-sm font-medium text-rose-100 transition hover:bg-rose-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {isStoppingRun ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <StopCircle className="h-4 w-4" />
-                        )}
-                        Stop
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </header>
-
-            {banner ? (
-              <div className={`glass-panel rounded-2xl border px-4 py-3 text-sm ${bannerClass(banner.tone)}`}>
+    <div className="page-stack">
+      {/* ─── Company Detail Modal ─────────────────────────────── */}
+      {selectedDetail && (() => {
+        const { contact, result } = selectedDetail;
+        const captcha = parseCaptchaStatus(result?.captchaStatus || "");
+        const isSuccess = result?.status === "success";
+        const isFail = result?.status === "fail";
+        const isWarning = result?.status === "warning";
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={() => setSelectedDetail(null)}>
+            <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className={`px-6 py-5 ${isSuccess ? "bg-green-50 border-b border-green-100" : isFail ? "bg-red-50 border-b border-red-100" : isWarning ? "bg-amber-50 border-b border-amber-100" : "bg-gray-50 border-b border-gray-100"}`}>
                 <div className="flex items-start justify-between gap-3">
-                  <p>{banner.message}</p>
-                  <button
-                    type="button"
-                    onClick={() => setBanner(null)}
-                    aria-label="Dismiss message"
-                    title="Dismiss message"
-                    className="rounded-md p-1 text-slate-200/90 transition hover:bg-slate-800/50"
-                  >
-                    <X className="h-4 w-4" />
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${isSuccess ? "bg-green-100" : isFail ? "bg-red-100" : isWarning ? "bg-amber-100" : "bg-gray-100"}`}>
+                      <StatusIcon status={result?.status ?? null} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-gray-900 text-base leading-tight">{contact.companyName}</h3>
+                      <a href={contact.contactUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1 mt-0.5">
+                        {contact.contactUrl.length > 50 ? contact.contactUrl.slice(0, 50) + "…" : contact.contactUrl}
+                        <ExternalLink size={10} />
+                      </a>
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => setSelectedDetail(null)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-white/60 rounded-lg transition-colors shrink-0">
+                    <X size={18} />
                   </button>
                 </div>
               </div>
-            ) : null}
 
-            {section === "overview" ? (
-              <section className="space-y-5">
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                  <StatCard title="Companies" value={String(contacts.length)} detail="Total contact records" />
-                  <StatCard title="Lists" value={String(lists.length)} detail="Organized contact segments" />
-                  <StatCard title="Campaigns" value={String(campaigns.length)} detail="Active campaign entities" />
-                  <StatCard
-                    title="Submission Rate"
-                    value={submissionRate}
-                    detail={`${totalSubmitted} submitted / ${totalFailed} failed`}
-                  />
-                </div>
-
-                <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
-                  <div className="glass-panel rounded-2xl p-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-slate-100">Recent Campaign Runs</p>
-                      <span className="rounded-full border border-slate-300/25 bg-slate-900/45 px-2.5 py-1 text-xs text-slate-300">
-                        {totalRuns} total runs
-                      </span>
-                    </div>
-
-                    <div className="mt-4 overflow-x-auto">
-                      <table className="min-w-full text-left text-sm">
-                        <thead>
-                          <tr className="border-b border-slate-300/15 text-xs uppercase tracking-[0.16em] text-slate-300/70">
-                            <th className="px-2 py-2">Campaign</th>
-                            <th className="px-2 py-2">Status</th>
-                            <th className="px-2 py-2">Processed</th>
-                            <th className="px-2 py-2">Duplicates</th>
-                            <th className="px-2 py-2">Captcha Credits</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {campaigns.flatMap((campaign) => campaign.runSummaries.slice(0, 1)).length === 0 ? (
-                            <tr>
-                              <td className="px-2 py-4 text-slate-300/70" colSpan={5}>
-                                No run history yet. Start a campaign to populate analytics.
-                              </td>
-                            </tr>
-                          ) : (
-                            campaigns.flatMap((campaign) => {
-                              const run = campaign.runSummaries[0];
-                              if (!run) {
-                                return [];
-                              }
-
-                              return [
-                                <tr key={`${campaign.id}-${run.runId}`} className="border-b border-slate-300/10">
-                                  <td className="px-2 py-3 text-slate-100">{campaign.name}</td>
-                                  <td className="px-2 py-3">
-                                    <span className={`rounded-full px-2 py-1 text-xs ${runStatusClass(run.status)}`}>
-                                      {run.status}
-                                    </span>
-                                  </td>
-                                  <td className="px-2 py-3 text-slate-200">
-                                    {run.processedLeads}/{run.totalLeads}
-                                  </td>
-                                  <td className="px-2 py-3 text-slate-200">{run.duplicatesSkipped}</td>
-                                  <td className="px-2 py-3 text-slate-200">
-                                    {run.captchaCreditsUsedToday}/{run.captchaCreditsLimit}
-                                  </td>
-                                </tr>,
-                              ];
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+              {/* Body */}
+              <div className="p-6 space-y-4">
+                {/* Status + Submitted row */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-gray-50 rounded-xl p-3">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide font-medium mb-1">Status</p>
+                    <span className={`text-sm font-semibold px-2.5 py-0.5 rounded-full ${isSuccess ? "bg-green-100 text-green-700" : isFail ? "bg-red-100 text-red-700" : isWarning ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                      {result?.status ?? "Pending"}
+                    </span>
                   </div>
-
-                  <div className="glass-panel rounded-2xl p-5">
-                    <p className="text-sm font-semibold text-slate-100">Live Run Telemetry</p>
-
-                    {activeRun ? (
-                      <div className="mt-4 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-slate-300">Status</span>
-                          <span className={`rounded-full px-2 py-1 text-xs ${runStatusClass(activeRun.status)}`}>
-                            {activeRun.status}
-                          </span>
-                        </div>
-
-                        <div>
-                          <div className="mb-1 flex items-center justify-between text-xs text-slate-300/85">
-                            <span>Progress</span>
-                            <span>{activeRun.progress}%</span>
-                          </div>
-                          <progress
-                            value={activeRun.progress}
-                            max={100}
-                            className="progress-track progress-runner h-2 w-full"
-                          />
-                          <p className="mt-1 text-xs text-slate-300/75">
-                            {activeRun.processedLeads}/{activeRun.totalLeads} processed
-                          </p>
-                        </div>
-
-                        <div className="rounded-xl border border-slate-300/15 bg-slate-950/45 p-3 text-xs text-slate-300/90">
-                          <p>Current lead: {activeRun.currentLead}</p>
-                          <p className="mt-1">
-                            CAPTCHA credits left today: {activeRun.captchaCreditsRemaining}/{activeRun.captchaCreditsLimit}
-                          </p>
-                          <p className="mt-1">Duplicates skipped: {activeRun.duplicatesSkipped}</p>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="mt-3 text-sm text-slate-300/75">No active run right now.</p>
-                    )}
-                  </div>
-                </div>
-              </section>
-            ) : null}
-
-            {section === "contacts" ? (
-              <section className="space-y-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  {[
-                    { id: "companies" as const, label: "Companies", icon: Users },
-                    { id: "lists" as const, label: "Lists", icon: ListChecks },
-                  ].map((tab) => {
-                    const active = contactsTab === tab.id;
-                    return (
-                      <button
-                        key={tab.id}
-                        type="button"
-                        onClick={() => setContactsTab(tab.id)}
-                        className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm transition ${
-                          active
-                            ? "border-sky-300/55 bg-sky-500/20 text-sky-100"
-                            : "border-slate-300/20 bg-slate-900/40 text-slate-300 hover:bg-slate-900/60"
-                        }`}
-                      >
-                        <tab.icon className="h-4 w-4" />
-                        {tab.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {contactsTab === "companies" ? (
-                  <div className="glass-panel overflow-x-auto rounded-2xl p-4">
-                    <table className="min-w-full text-left text-sm">
-                      <thead>
-                        <tr className="border-b border-slate-300/15 text-xs uppercase tracking-[0.16em] text-slate-300/70">
-                          <th className="px-3 py-2">Company Name</th>
-                          <th className="px-3 py-2">Website URL</th>
-                          <th className="px-3 py-2">Location</th>
-                          <th className="px-3 py-2">Industry</th>
-                          <th className="px-3 py-2">Employee Size</th>
-                          <th className="px-3 py-2">Contact Form URL</th>
-                          <th className="px-3 py-2">Status</th>
-                          <th className="px-3 py-2">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {contacts.map((contact) => (
-                          <tr key={contact.id} className="border-b border-slate-300/10 last:border-b-0">
-                            <td className="px-3 py-3 text-slate-100">{contact.companyName}</td>
-                            <td className="px-3 py-3 text-sky-200">{`https://${contact.domain}`}</td>
-                            <td className="px-3 py-3 text-slate-200">{contact.location}</td>
-                            <td className="px-3 py-3 text-slate-200">{contact.industry}</td>
-                            <td className="px-3 py-3 text-slate-200">{contact.employeeSize}</td>
-                            <td className="px-3 py-3 text-slate-200">{contact.contactUrl}</td>
-                            <td className="px-3 py-3">
-                              <span className={`rounded-full px-2 py-1 text-xs ${contactStatusClass(contact.status)}`}>
-                                {contact.status}
-                              </span>
-                            </td>
-                            <td className="px-3 py-3">
-                              <button
-                                type="button"
-                                onClick={() => deleteContact(contact.id)}
-                                className="inline-flex items-center gap-1 rounded-lg border border-rose-300/45 bg-rose-500/15 px-2 py-1 text-xs text-rose-100 transition hover:bg-rose-500/30"
-                                aria-label={`Delete ${contact.companyName}`}
-                                title={`Delete ${contact.companyName}`}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                                Delete
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-
-                {contactsTab === "lists" ? (
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {listCards.map((list) => (
-                      <div key={list.id} className="glass-panel rounded-2xl p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-semibold text-slate-100">{list.name}</p>
-                            <p className="text-xs text-slate-300/75">Created {formatTimestamp(list.createdAt)}</p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="rounded-full border border-slate-300/25 bg-slate-900/45 px-2 py-1 text-xs text-slate-200">
-                              {list.total} contacts
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => deleteList(list.id)}
-                              className="rounded-lg border border-rose-300/45 bg-rose-500/15 p-1.5 text-rose-100 transition hover:bg-rose-500/30"
-                              aria-label={`Delete list ${list.name}`}
-                              title={`Delete ${list.name}`}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="mt-3 text-xs text-slate-300/85">
-                          <p>Submitted: {list.submitted}</p>
-                          <p>Failed: {list.failed}</p>
-                          <p>Processed: {list.completion}</p>
-                        </div>
-
-                        <div className="mt-3">
-                          <div className="mb-1 flex items-center justify-between text-xs text-slate-300/80">
-                            <span>Progress</span>
-                            <span>{list.completion}</span>
-                          </div>
-                          <progress
-                            className="progress-track progress-runner h-2 w-full"
-                            value={list.total === 0 ? 0 : list.submitted + list.failed}
-                            max={list.total === 0 ? 1 : list.total}
-                          />
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => enqueueListForNextCampaign(list.id)}
-                          className="mt-4 inline-flex items-center gap-2 rounded-xl border border-sky-300/45 bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-100 transition hover:bg-sky-500/30"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add to Campaign
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </section>
-            ) : null}
-
-            {section === "campaigns" ? (
-              <section className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
-                <div className="space-y-4">
-                  <form onSubmit={handleCreateCampaign} className="glass-panel rounded-2xl p-4">
-                    <p className="text-sm font-semibold text-slate-100">Create Campaign</p>
-                    <p className="mt-1 text-xs text-slate-300/75">
-                      Only 2 fields required: campaign name + AI instruction.
-                    </p>
-
-                    <label className="mt-3 block text-xs uppercase tracking-[0.14em] text-slate-300/75">
-                      Campaign Name
-                    </label>
-                    <input
-                      value={draftCampaignName}
-                      onChange={(event) => setDraftCampaignName(event.target.value)}
-                      className="form-input mt-1"
-                      placeholder="Q2 SaaS Founder Outreach"
-                    />
-
-                    <label className="mt-3 block text-xs uppercase tracking-[0.14em] text-slate-300/75">
-                      AI Instruction
-                    </label>
-                    <textarea
-                      value={draftAiInstruction}
-                      onChange={(event) => setDraftAiInstruction(event.target.value)}
-                      rows={5}
-                      className="form-input mt-1 resize-y"
-                      placeholder="Use consultative tone, mention one pain point, one proof point, and one CTA."
-                    />
-
-                    <div className="mt-3 rounded-xl border border-slate-300/15 bg-slate-950/45 p-3">
-                      <p className="text-xs uppercase tracking-[0.14em] text-slate-300/70">Queued Lists</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {queuedListIds.length === 0 ? (
-                          <span className="text-xs text-slate-300/75">No lists queued yet.</span>
-                        ) : (
-                          queuedListIds.map((listId) => {
-                            const list = lists.find((item) => item.id === listId);
-                            if (!list) {
-                              return null;
-                            }
-
-                            return (
-                              <button
-                                key={list.id}
-                                type="button"
-                                onClick={() => removeQueuedList(list.id)}
-                                className="inline-flex items-center gap-1 rounded-full border border-sky-300/40 bg-sky-500/15 px-2 py-0.5 text-xs text-sky-100 transition hover:bg-sky-500/30"
-                                aria-label={`Remove ${list.name} from queued lists`}
-                                title={`Remove ${list.name}`}
-                              >
-                                {list.name}
-                                <X className="h-3 w-3" />
-                              </button>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-
-                    <button
-                      type="submit"
-                      className="mt-4 inline-flex items-center gap-2 rounded-xl border border-emerald-300/55 bg-emerald-500/20 px-3 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/35"
-                    >
-                      <CheckCircle2 className="h-4 w-4" />
-                      Create Campaign
-                    </button>
-                  </form>
-
-                  <div className="glass-panel rounded-2xl p-4">
-                    <p className="text-sm font-semibold text-slate-100">Campaigns</p>
-                    <div className="mt-3 space-y-2">
-                      {campaigns.map((campaign) => {
-                        const selected = campaign.id === selectedCampaignId;
-                        return (
-                          <div key={campaign.id} className="flex items-stretch gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedCampaignId(campaign.id)}
-                              className={`flex-1 rounded-xl border px-3 py-2 text-left transition ${
-                                selected
-                                  ? "border-sky-300/55 bg-sky-500/20 text-sky-100"
-                                  : "border-slate-300/20 bg-slate-900/40 text-slate-300 hover:bg-slate-900/60"
-                              }`}
-                            >
-                              <p className="text-sm font-medium">{campaign.name}</p>
-                              <p className="mt-0.5 text-xs text-inherit/80">
-                                {campaign.listIds.length} list(s) • {campaign.runSummaries.length} run(s)
-                              </p>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => deleteCampaign(campaign.id)}
-                              className="rounded-xl border border-rose-300/45 bg-rose-500/15 px-2.5 text-rose-100 transition hover:bg-rose-500/30"
-                              aria-label={`Delete campaign ${campaign.name}`}
-                              title={`Delete ${campaign.name}`}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
+                  <div className="bg-gray-50 rounded-xl p-3">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide font-medium mb-1">Form Submitted</p>
+                    <span className={`text-sm font-semibold ${result?.submitted === "Yes" ? "text-green-600" : "text-red-500"}`}>
+                      {result ? (result.submitted === "Yes" ? "✅ Yes" : "❌ No") : "—"}
+                    </span>
                   </div>
                 </div>
 
-                <div className="glass-panel rounded-2xl p-5">
-                  {selectedCampaign ? (
-                    <>
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-300/70">Selected Campaign</p>
-                          <h2 className="mt-1 text-xl font-semibold text-slate-50">{selectedCampaign.name}</h2>
-                          <p className="mt-1 text-sm text-slate-300/85">
-                            Created {formatTimestamp(selectedCampaign.createdAt)}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={clearSelectedCampaign}
-                            className="inline-flex items-center gap-2 rounded-xl border border-slate-300/35 bg-slate-900/45 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-slate-900/65"
-                          >
-                            <X className="h-4 w-4" />
-                            Close
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => deleteCampaign(selectedCampaign.id)}
-                            className="inline-flex items-center gap-2 rounded-xl border border-rose-300/55 bg-rose-500/20 px-3 py-2 text-xs font-medium text-rose-100 transition hover:bg-rose-500/35"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            Delete
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => void startCampaignRun(selectedCampaign)}
-                            disabled={isStartingRun || isRunActive}
-                            className="inline-flex items-center gap-2 rounded-xl border border-emerald-300/55 bg-emerald-500/20 px-3 py-2 text-xs font-medium text-emerald-100 transition hover:bg-emerald-500/35 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isStartingRun ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Play className="h-4 w-4" />
-                            )}
-                            Run Now
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => void stopCampaignRun()}
-                            disabled={!canStopRun || isStoppingRun}
-                            className="inline-flex items-center gap-2 rounded-xl border border-rose-300/55 bg-rose-500/20 px-3 py-2 text-xs font-medium text-rose-100 transition hover:bg-rose-500/35 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isStoppingRun ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <StopCircle className="h-4 w-4" />
-                            )}
-                            Stop
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="mt-4 flex flex-wrap items-center gap-2">
-                        {[
-                          { id: "contacts" as const, label: "Contacts", icon: Users },
-                          { id: "retarget" as const, label: "Retarget", icon: Target },
-                          { id: "settings" as const, label: "Settings", icon: Settings2 },
-                          { id: "logs" as const, label: "Logs", icon: Activity },
-                        ].map((tab) => {
-                          const active = campaignTab === tab.id;
-                          return (
-                            <button
-                              key={tab.id}
-                              type="button"
-                              onClick={() => setCampaignTab(tab.id)}
-                              className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-sm transition ${
-                                active
-                                  ? "border-sky-300/55 bg-sky-500/20 text-sky-100"
-                                  : "border-slate-300/20 bg-slate-900/40 text-slate-300 hover:bg-slate-900/60"
-                              }`}
-                            >
-                              <tab.icon className="h-4 w-4" />
-                              {tab.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {campaignTab === "contacts" ? (
-                        <div className="mt-4 space-y-4">
-                          <div className="rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                            <p className="text-sm font-semibold text-slate-100">Attached Lists</p>
-                            <p className="mt-1 text-xs text-slate-300/75">
-                              Select the lists this campaign should process.
-                            </p>
-
-                            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                              {lists.map((list) => {
-                                const attached = selectedCampaign.listIds.includes(list.id);
-                                return (
-                                  <label
-                                    key={list.id}
-                                    className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm transition ${
-                                      attached
-                                        ? "border-sky-300/50 bg-sky-500/15 text-sky-100"
-                                        : "border-slate-300/20 bg-slate-900/45 text-slate-300"
-                                    }`}
-                                  >
-                                    <span>{list.name}</span>
-                                    <input
-                                      type="checkbox"
-                                      checked={attached}
-                                      onChange={() => toggleCampaignList(selectedCampaign.id, list.id)}
-                                      className="h-4 w-4 accent-sky-500"
-                                    />
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          <div className="overflow-x-auto rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                            <p className="mb-3 text-sm font-semibold text-slate-100">Campaign Contacts</p>
-                            <table className="min-w-full text-left text-sm">
-                              <thead>
-                                <tr className="border-b border-slate-300/15 text-xs uppercase tracking-[0.16em] text-slate-300/70">
-                                  <th className="px-2 py-2">Company</th>
-                                  <th className="px-2 py-2">Contact URL</th>
-                                  <th className="px-2 py-2">Status</th>
-                                  <th className="px-2 py-2">Last Result</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {selectedCampaignContacts.length === 0 ? (
-                                  <tr>
-                                    <td className="px-2 py-4 text-slate-300/70" colSpan={4}>
-                                      No contacts linked. Attach one or more lists above.
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  selectedCampaignContacts.map((contact) => (
-                                    <tr key={contact.id} className="border-b border-slate-300/10 last:border-b-0">
-                                      <td className="px-2 py-3 text-slate-100">{contact.companyName}</td>
-                                      <td className="px-2 py-3 text-slate-200">{contact.contactUrl}</td>
-                                      <td className="px-2 py-3">
-                                        <span
-                                          className={`rounded-full px-2 py-1 text-xs ${contactStatusClass(contact.status)}`}
-                                        >
-                                          {contact.status}
-                                        </span>
-                                      </td>
-                                      <td className="px-2 py-3 text-xs text-slate-300/90">
-                                        {contact.lastResult
-                                          ? `${contact.lastResult.confirmation || "-"} (${formatCurrency(contact.lastResult.costUsd)})`
-                                          : "-"}
-                                      </td>
-                                    </tr>
-                                  ))
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {campaignTab === "retarget" ? (
-                        <div className="mt-4 rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                          <p className="text-sm font-semibold text-slate-100">Retarget Steps</p>
-                          <p className="mt-1 text-xs text-slate-300/75">
-                            Follow-ups automatically trigger for non-submitted contacts.
-                          </p>
-
-                          <div className="mt-3 space-y-3">
-                            {selectedCampaign.steps.map((step) => (
-                              <div
-                                key={step.id}
-                                className="rounded-xl border border-slate-300/20 bg-slate-900/45 p-3"
-                              >
-                                <div className="flex flex-wrap items-center justify-between gap-3">
-                                  <div>
-                                    <p className="text-sm font-medium text-slate-100">{step.title}</p>
-                                    <p className="text-xs text-slate-300/80">
-                                      Runs after {step.daysAfter} day(s) for pending leads.
-                                    </p>
-                                  </div>
-
-                                  <div className="flex items-center gap-3">
-                                    <label className="text-xs text-slate-300/90">Delay (days)</label>
-                                    <input
-                                      type="number"
-                                      min={1}
-                                      value={step.daysAfter}
-                                      aria-label={`Delay in days for ${step.title}`}
-                                      title={`Delay in days for ${step.title}`}
-                                      onChange={(event) =>
-                                        updateRetargetStepDelay(
-                                          selectedCampaign.id,
-                                          step.id,
-                                          event.target.value,
-                                        )
-                                      }
-                                      className="form-input w-20"
-                                    />
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleRetargetStep(selectedCampaign.id, step.id)}
-                                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                                        step.enabled
-                                          ? "border-emerald-300/55 bg-emerald-500/20 text-emerald-100"
-                                          : "border-slate-300/25 bg-slate-900/45 text-slate-300"
-                                      }`}
-                                    >
-                                      {step.enabled ? "Enabled" : "Disabled"}
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {campaignTab === "settings" ? (
-                        <div className="mt-4 space-y-4">
-                          <div className="rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                            <p className="text-sm font-semibold text-slate-100">Campaign Settings</p>
-
-                            <label className="mt-3 block text-xs uppercase tracking-[0.14em] text-slate-300/75">
-                              Max Daily Submissions
-                            </label>
-                            <input
-                              type="number"
-                              min={1}
-                              value={selectedCampaign.maxDailySubmissions}
-                              aria-label="Max daily submissions"
-                              title="Max daily submissions"
-                              onChange={(event) =>
-                                updateCampaignDailyLimit(selectedCampaign.id, event.target.value)
-                              }
-                              className="form-input mt-1 w-52"
-                            />
-                            <p className="mt-2 text-xs text-slate-300/80">
-                              This is enforced by backend safeguards before and during a run.
-                            </p>
-                          </div>
-
-                          <div className="rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                            <p className="text-sm font-semibold text-slate-100">AI Instruction</p>
-                            <p className="mt-2 whitespace-pre-wrap text-sm text-slate-200/90">
-                              {selectedCampaign.aiInstruction}
-                            </p>
-                            <p className="mt-3 text-xs text-slate-300/75">
-                              One AI call is made per form submission attempt.
-                            </p>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {campaignTab === "logs" ? (
-                        <div className="mt-4 space-y-4">
-                          <div className="rounded-2xl border border-slate-300/15 bg-slate-950/45 p-4">
-                            <p className="text-sm font-semibold text-slate-100">Campaign Level Tracking</p>
-                            {selectedCampaignRun ? (
-                              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Run ID</p>
-                                  <p className="mt-1 break-all text-slate-100">{selectedCampaignRun.runId}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Progress</p>
-                                  <p className="mt-1 text-slate-100">
-                                    {selectedCampaignRun.processedLeads}/{selectedCampaignRun.totalLeads}
-                                  </p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Duplicates Skipped</p>
-                                  <p className="mt-1 text-slate-100">{selectedCampaignRun.duplicatesSkipped}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Captcha Used</p>
-                                  <p className="mt-1 text-slate-100">
-                                    {selectedCampaignRun.captchaCreditsUsedToday}/{selectedCampaignRun.captchaCreditsLimit}
-                                  </p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Captcha Remaining</p>
-                                  <p className="mt-1 text-slate-100">{selectedCampaignRun.captchaCreditsRemaining}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Status</p>
-                                  <span
-                                    className={`mt-1 inline-block rounded-full px-2 py-1 text-xs ${runStatusClass(
-                                      selectedCampaignRun.status,
-                                    )}`}
-                                  >
-                                    {selectedCampaignRun.status}
-                                  </span>
-                                </div>
-                              </div>
-                            ) : selectedCampaignLatestRun ? (
-                              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Run ID</p>
-                                  <p className="mt-1 break-all text-slate-100">{selectedCampaignLatestRun.runId}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Processed</p>
-                                  <p className="mt-1 text-slate-100">
-                                    {selectedCampaignLatestRun.processedLeads}/{selectedCampaignLatestRun.totalLeads}
-                                  </p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Duplicates Skipped</p>
-                                  <p className="mt-1 text-slate-100">{selectedCampaignLatestRun.duplicatesSkipped}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Captcha Used</p>
-                                  <p className="mt-1 text-slate-100">
-                                    {selectedCampaignLatestRun.captchaCreditsUsedToday}/{selectedCampaignLatestRun.captchaCreditsLimit}
-                                  </p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Captcha Remaining</p>
-                                  <p className="mt-1 text-slate-100">
-                                    {selectedCampaignLatestRun.captchaCreditsRemaining}
-                                  </p>
-                                </div>
-                                <div className="rounded-xl border border-slate-300/15 bg-slate-900/45 p-3 text-sm">
-                                  <p className="text-slate-300/80">Status</p>
-                                  <span
-                                    className={`mt-1 inline-block rounded-full px-2 py-1 text-xs ${runStatusClass(
-                                      selectedCampaignLatestRun.status,
-                                    )}`}
-                                  >
-                                    {selectedCampaignLatestRun.status}
-                                  </span>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="mt-2 text-sm text-slate-300/75">
-                                No run logs yet for this campaign.
-                              </p>
-                            )}
-                          </div>
-
-                          <div className="terminal-shell rounded-2xl p-4">
-                            <p className="text-sm font-semibold text-slate-100">Logs</p>
-                            <div className="mt-3 max-h-[320px] overflow-auto rounded-xl border border-slate-300/15 bg-slate-950/70 p-3 text-xs text-slate-200">
-                              {(selectedCampaignRun?.logs ?? selectedCampaignLatestRun?.logsTail ?? []).length === 0 ? (
-                                <p className="text-slate-300/70">No logs available.</p>
-                              ) : (
-                                (selectedCampaignRun?.logs ?? selectedCampaignLatestRun?.logsTail ?? []).map(
-                                  (line, index) => (
-                                    <p key={`${line.slice(0, 20)}-${index}`} className="font-mono">
-                                      {line}
-                                    </p>
-                                  ),
-                                )
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <div className="rounded-2xl border border-slate-300/20 bg-slate-900/45 p-6 text-center text-slate-300/85">
-                      No campaign selected.
-                    </div>
-                  )}
+                {/* Captcha row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide font-medium mb-1">Captcha Found</p>
+                    <span className="text-lg">{result ? (captcha.found ? "✅" : "❌") : "—"}</span>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide font-medium mb-1">Captcha Solved</p>
+                    <span className="text-lg">{result ? (captcha.solved ? "✅" : "❌") : "—"}</span>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-3 text-center">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide font-medium mb-1">Site Key ⚠️</p>
+                    <span className="text-lg">{result ? (captcha.siteKeyNotFound ? "⚠️" : "—") : "—"}</span>
+                  </div>
                 </div>
-              </section>
-            ) : null}
-          </main>
-        </div>
-      </div>
 
-      {showAddContactsModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4">
-          <div className="glass-panel w-full max-w-2xl rounded-2xl p-5">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-300/70">Add Contacts</p>
-                <h3 className="mt-1 text-xl font-semibold text-slate-50">Create List and Upload CSV</h3>
-                <p className="mt-1 text-sm text-slate-300/80">
-                  Step {addContactsStep} of 2: enter list name, then upload contacts CSV.
-                </p>
+                {/* Confirmation message */}
+                {result?.confirmationMsg && (
+                  <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+                    <p className="text-xs text-blue-500 uppercase tracking-wide font-medium mb-1.5">Confirmation / Details</p>
+                    <p className="text-sm text-blue-900 leading-relaxed break-words">{result.confirmationMsg}</p>
+                  </div>
+                )}
+
+                {/* Captcha status raw */}
+                {result?.captchaStatus && result.captchaStatus !== "none" && (
+                  <div className="bg-purple-50 border border-purple-100 rounded-xl p-4">
+                    <p className="text-xs text-purple-500 uppercase tracking-wide font-medium mb-1.5">Captcha Detail</p>
+                    <p className="text-xs text-purple-800 font-mono break-words">{result.captchaStatus}</p>
+                  </div>
+                )}
+
+                {/* Cost */}
+                {result?.estCostUsd != null && result.estCostUsd > 0 && (
+                  <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 rounded-xl">
+                    <span className="text-sm text-gray-500">Estimated AI Cost</span>
+                    <span className="text-sm font-semibold text-gray-800">${result.estCostUsd.toFixed(5)}</span>
+                  </div>
+                )}
+
+                {/* Added date */}
+                <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 rounded-xl">
+                  <span className="text-sm text-gray-500">Added to Campaign</span>
+                  <span className="text-sm text-gray-700">{formatDateTime(contact.createdAt)}</span>
+                </div>
               </div>
 
+              {/* Footer */}
+              <div className="px-6 pb-5 flex justify-end gap-2">
+                <a
+                  href={contact.contactUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                >
+                  <ExternalLink size={14} /> Open Site
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDetail(null)}
+                  className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ─── Add Steps Modal ──────────────────────────────────── */}
+      {showStepsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 shrink-0">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Campaign Steps</h3>
+                <p className="text-xs text-gray-500 mt-0.5">Add separate AI instructions for follow-up steps using the same contacts.</p>
+              </div>
+              <button onClick={() => setShowStepsModal(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              {stepsLocal.map((step, i) => (
+                <div key={i} className="flex gap-3 items-start">
+                  <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center shrink-0 mt-1">
+                    {i + 1}
+                  </div>
+                  <textarea
+                    value={step}
+                    onChange={(e) => setStepsLocal(prev => prev.map((s, idx) => idx === i ? e.target.value : s))}
+                    rows={3}
+                    className="field-input field-textarea flex-1 text-sm"
+                    placeholder={`Step ${i + 1} AI instruction...`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setStepsLocal(prev => prev.filter((_, idx) => idx !== i))}
+                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors mt-1"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
               <button
                 type="button"
-                onClick={closeAddContactsModal}
-                aria-label="Close add contacts dialog"
-                title="Close add contacts dialog"
-                className="rounded-lg p-1 text-slate-200 transition hover:bg-slate-800/55"
+                onClick={() => setStepsLocal(prev => [...prev, ""])}
+                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 font-medium px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors"
               >
-                <X className="h-4 w-4" />
+                <Plus size={16} /> Add Step
               </button>
             </div>
-
-            {addContactsStep === 1 ? (
-              <div className="mt-4 rounded-2xl border border-slate-300/20 bg-slate-900/45 p-4">
-                <label className="text-xs uppercase tracking-[0.14em] text-slate-300/75">List Name</label>
-                <input
-                  value={newListName}
-                  onChange={(event) => setNewListName(event.target.value)}
-                  className="form-input mt-2"
-                  placeholder="April SaaS Prospects"
-                />
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={handleNextAddContactsStep}
-                    className="inline-flex items-center gap-2 rounded-xl border border-sky-300/55 bg-sky-500/20 px-3 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-500/35"
-                  >
-                    <UploadCloud className="h-4 w-4" />
-                    Continue to Upload
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={downloadCsvTemplate}
-                    className="inline-flex items-center gap-2 rounded-xl border border-slate-300/35 bg-slate-900/45 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-900/65"
-                  >
-                    Download Template
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {addContactsStep === 2 ? (
-              <div className="mt-4 rounded-2xl border border-slate-300/20 bg-slate-900/45 p-4">
-                <p className="text-sm text-slate-200">
-                  Upload CSV into list: <span className="font-semibold">{newListName}</span>
-                </p>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".csv,text/csv"
-                  aria-label="Upload contacts CSV"
-                  title="Upload contacts CSV"
-                  onChange={handleCsvUpload}
-                  disabled={isParsingCsv}
-                  className="mt-3 block w-full rounded-xl border border-slate-300/30 bg-slate-950/45 p-3 text-sm text-slate-200 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-700/80 file:px-3 file:py-1.5 file:text-slate-100"
-                />
-
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setAddContactsStep(1)}
-                    className="rounded-xl border border-slate-300/35 bg-slate-900/45 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-900/65"
-                  >
-                    Back
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={downloadCsvTemplate}
-                    className="rounded-xl border border-slate-300/35 bg-slate-900/45 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-900/65"
-                  >
-                    Download Template
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {csvFeedback ? (
-              <div className="mt-4 rounded-xl border border-slate-300/20 bg-slate-900/55 p-3 text-sm text-slate-200">
-                <div className="flex items-start gap-2">
-                  {csvFeedback.toLowerCase().includes("failed") ||
-                  csvFeedback.toLowerCase().includes("no contacts") ? (
-                    <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-300" />
-                  ) : (
-                    <CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-300" />
-                  )}
-                  <p>{csvFeedback}</p>
-                </div>
-              </div>
-            ) : null}
-
-            {isParsingCsv ? (
-              <div className="mt-4 inline-flex items-center gap-2 rounded-xl border border-sky-300/45 bg-sky-500/15 px-3 py-1.5 text-sm text-sky-100">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Processing contacts...
-              </div>
-            ) : null}
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => void saveSteps()}
+                disabled={savingSteps}
+                className="flex-1 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {savingSteps ? "Saving..." : "Save Steps"}
+              </button>
+              <button type="button" onClick={() => setShowStepsModal(false)} className="px-5 py-2.5 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50">
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
-      ) : null}
+      )}
+
+      {/* ─── Import from List Modal ───────────────────────────── */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-xl flex flex-col max-h-[80vh]">
+            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">Import from Contact List</h3>
+              <button onClick={() => setShowImportModal(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="p-6 overflow-y-auto flex-1">
+              {availableLists.length === 0 ? (
+                <div className="text-center py-8">
+                  <Database size={40} className="mx-auto text-gray-300 mb-3" strokeWidth={1} />
+                  <p className="text-gray-500 text-sm">No contact lists found. Create one from the Contact Lists page.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {availableLists.map(list => (
+                    <div key={list.id} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
+                      <div>
+                        <p className="font-medium text-gray-900 text-sm">{list.name}</p>
+                        <p className="text-xs text-gray-500">{list.contacts.length} contacts · {new Date(list.createdAt).toLocaleDateString()}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void importFromList(list)}
+                        disabled={importingListId === list.id}
+                        className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-md hover:bg-blue-700 disabled:bg-gray-300 transition-colors"
+                      >
+                        {importingListId === list.id ? "Importing..." : "Import"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Header ───────────────────────────────────────────── */}
+      <section className="panel">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={() => router.push("/campaigns")} className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
+              <ChevronLeft size={18} />
+            </button>
+            <div>
+              <p className="text-xs text-gray-400 uppercase tracking-wider font-medium">Campaign</p>
+              <h2 className="text-xl font-bold text-gray-900">{campaign.name}</h2>
+            </div>
+            <span className={`status-chip ${statusTone(campaign.status)}`}>{campaign.status}</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => { setStepsLocal(campaign.steps || []); setShowStepsModal(true); }}
+              className="flex items-center gap-2 px-3 py-2 border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg text-sm font-medium transition-colors"
+            >
+              <Plus size={15} /> Add Steps
+            </button>
+            <button
+              type="button"
+              onClick={() => void startRun()}
+              disabled={startingRun || runActive}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <Play size={15} /> {startingRun ? "Starting..." : (campaign.lastRun?.status === "stopped" || campaign.lastRun?.status === "error") ? "Resume Run" : "Start Run"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopRun()}
+              disabled={!runActive || stoppingRun}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <Square size={15} /> {stoppingRun ? "Stopping..." : "Stop Run"}
+            </button>
+          </div>
+        </div>
+
+        {/* Stats strip */}
+        <div style={{ display: "flex", gap: "24px", marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #f3f4f6", flexWrap: "wrap" }}>
+          <div>
+            <p className="meta-label">Contacts</p>
+            <p className="text-lg font-bold text-gray-900">{campaign.contactCount}</p>
+          </div>
+          <div>
+            <p className="meta-label">Successful</p>
+            <p className="text-lg font-bold text-green-600">{stats.success}</p>
+          </div>
+          <div>
+            <p className="meta-label">Failed</p>
+            <p className="text-lg font-bold text-red-500">{stats.fail}</p>
+          </div>
+          <div>
+            <p className="meta-label">Remaining</p>
+            <p className="text-lg font-bold text-gray-600">{stats.pending + stats.warning}</p>
+          </div>
+          <div>
+            <p className="meta-label">Daily Limit</p>
+            <p className="text-lg font-bold text-blue-600">{campaign.maxDailySubmissions}</p>
+          </div>
+        </div>
+
+        {/* Stopped run reminder */}
+        {campaign.lastRun && (campaign.lastRun.status === "stopped" || campaign.lastRun.status === "error") && !runActive && (
+          <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
+            <AlertTriangle className="text-amber-600 mt-0.5 shrink-0" size={16} />
+            <div>
+              <p className="text-sm font-medium text-amber-800">
+                Run paused at company {campaign.lastRun.processedLeads} of {campaign.lastRun.totalLeads}
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                Click "Resume Run" at the top to automatically continue from the next company.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Run progress */}
+        {runSnapshot && isActiveRun(runSnapshot.status) && (
+          <div style={{ marginTop: "12px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+              <p className="text-xs text-gray-500">Run progress · {runSnapshot.processedLeads}/{runSnapshot.totalLeads}</p>
+              <p className="text-xs font-medium text-blue-600">{runSnapshot.progress}%</p>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+              <div className="bg-blue-600 h-2 rounded-full transition-all duration-500" style={{ width: `${runSnapshot.progress}%` }} />
+            </div>
+          </div>
+        )}
+
+        {message && <p className="panel-muted mt-3 text-sm">{message}</p>}
+      </section>
+
+      {/* ─── Tabs ─────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: "4px", padding: "0 4px" }}>
+        {(["contacts", "activity", "settings"] as Tab[]).map((tab) => {
+          const icons: Record<Tab, React.ReactNode> = {
+            contacts: <Users size={15} />,
+            activity: <Activity size={15} />,
+            settings: <Settings size={15} />,
+          };
+          const labels: Record<Tab, string> = {
+            contacts: "Contacts",
+            activity: "Activity",
+            settings: "Settings",
+          };
+          return (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-t-lg text-sm font-medium transition-colors ${activeTab === tab
+                ? "bg-white border border-b-0 border-gray-200 text-blue-600"
+                : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                }`}
+            >
+              {icons[tab]} {labels[tab]}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ─── CONTACTS TAB ─────────────────────────────────────── */}
+      {activeTab === "contacts" && (
+        <section className="panel" style={{ borderTopLeftRadius: 0 }}>
+          <div className="panel-header">
+            <h3 className="font-semibold text-gray-800">Campaign Contacts</h3>
+            <div className="flex items-center gap-2">
+              {contacts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void deleteAllContacts()}
+                  disabled={deletingAllContacts}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 text-sm font-medium rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50"
+                  title="Delete all contacts in this campaign"
+                >
+                  <Trash2 size={14} /> {deletingAllContacts ? "Deleting..." : "Remove All"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => { setAvailableLists(loadLists()); setShowImportModal(true); }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                title="Add contacts from lists"
+              >
+                <Database size={14} /> Add from Lists
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 mb-4">
+            <div className="relative flex-1">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                value={searchContacts}
+                onChange={(e) => setSearchContacts(e.target.value)}
+                className="field-input pl-8"
+                placeholder="Search contacts..."
+              />
+            </div>
+          </div>
+
+          {filteredContacts.length === 0 ? (
+            <div className="empty-state">
+              <Users size={48} strokeWidth={1} />
+              <h3>No contacts yet</h3>
+              <p>Import contacts from your Contact Lists to get started.</p>
+              <button
+                type="button"
+                onClick={() => { setAvailableLists(loadLists()); setShowImportModal(true); }}
+                className="mt-3 flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 mx-auto transition-colors"
+              >
+                <Database size={14} /> Import from Lists
+              </button>
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table className="clean-table">
+                <thead>
+                  <tr>
+                    <th>Company</th>
+                    <th>Domain</th>
+                    <th>Contact URL</th>
+                    <th>Interested</th>
+                    <th>Added</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredContacts.map((contact) => (
+                    <tr key={contact.id}>
+                      <td className="font-medium">{contact.companyName}</td>
+                      <td className="text-gray-500">{contact.domain || "—"}</td>
+                      <td>
+                        <a href={contact.contactUrl} target="_blank" rel="noreferrer" className="table-link flex items-center gap-1">
+                          <span className="truncate max-w-[200px] inline-block">{contact.contactUrl}</span>
+                          <ExternalLink size={12} />
+                        </a>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => void toggleInterested(contact)}
+                          disabled={togglingContactId === contact.id}
+                          title={contact.isInterested ? "Mark as not interested" : "Mark as interested"}
+                          className={`w-6 h-6 rounded border-2 flex items-center justify-center transition-colors ${contact.isInterested
+                            ? "border-pink-500 bg-pink-50 text-pink-600"
+                            : "border-gray-300 hover:border-pink-400"
+                            }`}
+                        >
+                          {contact.isInterested && <Heart size={12} fill="currentColor" />}
+                        </button>
+                      </td>
+                      <td className="text-gray-400 text-xs">{formatDateTime(contact.createdAt)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="table-delete flex items-center gap-1"
+                          onClick={() => void deleteContact(contact.id)}
+                          disabled={deletingContactId === contact.id}
+                        >
+                          <Trash2 size={12} />
+                          {deletingContactId === contact.id ? "..." : "Remove"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ─── ACTIVITY TAB ─────────────────────────────────────── */}
+      {activeTab === "activity" && (
+        <section className="panel" style={{ borderTopLeftRadius: 0 }}>
+          {/* ─── Logs Panel ──────────────────────────────────────── */}
+          <div style={{ marginBottom: "20px" }}>
+            <div className="flex items-center justify-between mb-3">
+              <button
+                type="button"
+                onClick={() => { setShowLogs(v => !v); if (!showLogs) void fetchLogs(); }}
+                className="flex items-center gap-2 text-sm font-semibold text-gray-700 hover:text-gray-900 transition-colors"
+              >
+                <Terminal size={15} className="text-gray-500" />
+                {showLogs ? "Hide" : "Show"} Live Logs
+                <span className="text-xs text-gray-400 font-normal">(raw scraper output)</span>
+              </button>
+              {showLogs && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void fetchLogs()}
+                    disabled={logsLoading}
+                    className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                  >
+                    <RefreshCw size={12} className={logsLoading ? "animate-spin" : ""} /> Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void navigator.clipboard.writeText(logs.join("\n")); }}
+                    className="text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                  >
+                    Copy All
+                  </button>
+                </div>
+              )}
+            </div>
+            {showLogs && (
+              <div
+                style={{
+                  background: "#0f172a",
+                  borderRadius: "10px",
+                  padding: "16px",
+                  maxHeight: "420px",
+                  overflowY: "auto",
+                  fontFamily: "'Courier New', Courier, monospace",
+                  fontSize: "11.5px",
+                  lineHeight: "1.6",
+                  border: "1px solid #1e293b",
+                }}
+              >
+                {logs.length === 0 ? (
+                  <p style={{ color: "#64748b", margin: 0 }}>
+                    {logsLoading ? "Loading logs..." : "No logs available. Start a campaign run to see live output here."}
+                  </p>
+                ) : (
+                  logs.map((line, i) => {
+                    const lower = line.toLowerCase();
+                    const color =
+                      lower.includes("[result]") && lower.includes('"submitted": "yes"') ? "#4ade80" :
+                        lower.includes("[result]") ? "#f87171" :
+                          lower.includes("[limit]") ? "#fbbf24" :
+                            lower.includes("[fatal]") || lower.includes("error") ? "#f87171" :
+                              lower.includes("[worker") ? "#93c5fd" :
+                                lower.includes("✓") || lower.includes("success") ? "#4ade80" :
+                                  lower.includes("[captcha") ? "#c084fc" :
+                                    lower.includes("[form") ? "#67e8f9" :
+                                      "#94a3b8";
+                    return (
+                      <div key={i} style={{ color, wordBreak: "break-all", marginBottom: "2px" }}>
+                        {line}
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={logsEndRef} />
+              </div>
+            )}
+          </div>
+
+          {/* Stats row */}
+          <div className="flex items-center gap-4 flex-wrap mb-4">
+            {(["all", "success", "fail", "warning", "pending"] as FilterMode[]).map((mode) => {
+              const count = mode === "all" ? stats.total : stats[mode as keyof typeof stats] as number;
+              const colors: Record<string, string> = { all: "bg-gray-100 text-gray-700", success: "bg-green-100 text-green-700", fail: "bg-red-100 text-red-700", warning: "bg-amber-100 text-amber-700", pending: "bg-gray-100 text-gray-500" };
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setFilterMode(mode)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all border-2 ${colors[mode]} ${filterMode === mode ? "border-current opacity-100" : "border-transparent opacity-70 hover:opacity-100"}`}
+                >
+                  {mode.charAt(0).toUpperCase() + mode.slice(1)}: <strong>{count}</strong>
+                </button>
+              );
+            })}
+            <div className="ml-auto flex items-center gap-2">
+              {runSnapshot && (
+                <button type="button" onClick={exportResultsToCsv} className="button-secondary flex items-center gap-1.5 text-xs">
+                  <DownloadIcon size={13} /> Export CSV
+                </button>
+              )}
+              {runSnapshot && (
+                <button
+                  type="button"
+                  className="button-secondary text-xs"
+                  onClick={() => {
+                    try { localStorage.removeItem(`run-snapshot-${campaignId}`); } catch { /* ignore */ }
+                    setRunSnapshot(null);
+                  }}
+                >
+                  Clear Results
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Search */}
+          <div className="relative mb-4">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={searchActivity}
+              onChange={(e) => setSearchActivity(e.target.value)}
+              className="field-input pl-8"
+              placeholder="Search company or URL..."
+            />
+          </div>
+
+          {!runSnapshot && (
+            <div className="empty-state">
+              <Activity size={48} strokeWidth={1} />
+              <h3>No run results yet</h3>
+              <p>Start a campaign run from the header above to see activity here.</p>
+            </div>
+          )}
+
+          {runSnapshot && (
+            <div className="table-wrap">
+              <table className="clean-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Company</th>
+                    <th>Contact URL</th>
+                    <th>Status</th>
+                    <th>Captcha Found</th>
+                    <th>Captcha Solved</th>
+                    <th>Site Key Not Found</th>
+                    <th>Form Found</th>
+                    <th>Interested</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activityRows.length === 0 ? (
+                    <tr><td colSpan={10} className="table-empty">No results match current filter.</td></tr>
+                  ) : (
+                    activityRows.map((contact) => {
+                      const result = getContactResult(contact);
+                      const captcha = parseCaptchaStatus(result?.captchaStatus || "");
+                      const _conf = (result?.confirmationMsg || "").toLowerCase();
+                      const _cap = (result?.captchaStatus || "").toLowerCase();
+                      const _negatives = ["not found", "not filled", "could not find", "no form", "form not", "unable to find", "failed to find", "no contact"];
+                      const _capFoundPositive = _cap.includes("found") && !_negatives.some(n => _cap.includes(n));
+                      const _confFormPositive = (_conf.includes("form") || _conf.includes("submitted") || _conf.includes("sent") || _conf.includes("message")) && !_negatives.some(n => _conf.includes(n));
+                      const formFound = _capFoundPositive || _confFormPositive;
+                      return (
+                        <tr key={contact.id} className={result?.status === "success" ? "bg-green-50/30" : result?.status === "fail" ? "bg-red-50/30" : ""}>
+                          <td><StatusIcon status={result?.status ?? null} /></td>
+                          <td
+                            className="font-medium text-blue-700 cursor-pointer hover:underline hover:text-blue-900 transition-colors"
+                            onClick={() => setSelectedDetail({ contact, result: result ?? null })}
+                            title="Click for full details"
+                          >
+                            {contact.companyName}
+                          </td>
+                          <td>
+                            <a href={contact.contactUrl} target="_blank" rel="noreferrer" className="table-link flex items-center gap-1">
+                              <span className="truncate max-w-[160px] inline-block">{contact.contactUrl}</span>
+                              <ExternalLink size={11} />
+                            </a>
+                          </td>
+                          <td>
+                            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${result?.status === "success" ? "bg-green-100 text-green-700" :
+                              result?.status === "fail" ? "bg-red-100 text-red-700" :
+                                result?.status === "warning" ? "bg-amber-100 text-amber-700" :
+                                  "bg-gray-100 text-gray-500"
+                              }`}>
+                              {result?.status ?? "pending"}
+                            </span>
+                          </td>
+                          <td className="text-center">{result ? (captcha.found ? "✅" : "❌") : "—"}</td>
+                          <td className="text-center">{result ? (captcha.solved ? "✅" : "❌") : "—"}</td>
+                          <td className="text-center">{result ? (captcha.siteKeyNotFound ? "⚠️" : "—") : "—"}</td>
+                          <td className="text-center">{result ? (formFound ? "✅" : "❌") : "—"}</td>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => void toggleInterested(contact)}
+                              disabled={togglingContactId === contact.id}
+                              className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${contact.isInterested ? "border-pink-500 bg-pink-50 text-pink-600" : "border-gray-300 hover:border-pink-400"
+                                }`}
+                            >
+                              {contact.isInterested && <Heart size={10} fill="currentColor" />}
+                            </button>
+                          </td>
+                          <td className="text-xs text-gray-400 max-w-[180px] truncate" title={result?.confirmationMsg}>
+                            <button
+                              type="button"
+                              className="text-xs text-blue-600 hover:underline"
+                              onClick={() => setSelectedDetail({ contact, result: result ?? null })}
+                            >
+                              {result ? "View Details" : "—"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Recent Runs */}
+          {runs.length > 0 && (
+            <div style={{ marginTop: "24px" }}>
+              <h4 className="font-semibold text-gray-700 text-sm mb-3">Past Runs</h4>
+              <div className="table-wrap">
+                <table className="clean-table">
+                  <thead>
+                    <tr><th>Run ID</th><th>Status</th><th>Total</th><th>Processed</th><th>Duplicates Skipped</th><th>Started</th><th>Finished</th></tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((run) => (
+                      <tr key={run.runId}>
+                        <td className="font-mono text-xs">{run.runId}</td>
+                        <td><span className={`status-chip ${statusTone(run.status)}`}>{run.status}</span></td>
+                        <td>{run.totalLeads}</td>
+                        <td>{run.processedLeads}</td>
+                        <td>{run.duplicatesSkipped}</td>
+                        <td className="text-xs text-gray-500">{formatDateTime(run.startedAt)}</td>
+                        <td className="text-xs text-gray-500">{run.finishedAt ? formatDateTime(run.finishedAt) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ─── SETTINGS TAB ─────────────────────────────────────── */}
+      {activeTab === "settings" && (
+        <section className="panel" style={{ borderTopLeftRadius: 0 }}>
+          <h3 className="font-semibold text-gray-800 mb-4">Campaign Settings</h3>
+          {message && <p className="text-sm mb-3 px-3 py-2 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg">{message}</p>}
+          <div className="form-grid">
+            <label className="field-block">
+              Campaign Name
+              <input value={editName} onChange={(e) => setEditName(e.target.value)} className="field-input" />
+            </label>
+            <label className="field-block">
+              Status
+              <select
+                value={editStatus}
+                onChange={(e) => setEditStatus(e.target.value as CampaignRecord["status"])}
+                className="field-input"
+              >
+                {["draft", "active", "paused", "archived"].map(s => (
+                  <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field-block">
+              <span className="font-medium text-gray-700 text-sm">Daily Successful Submissions Limit</span>
+              <p className="text-xs text-gray-400 mb-1">Automation stops after this many successful (submitted = Yes) contacts. Failures don&apos;t count towards this limit.</p>
+              <input
+                type="number"
+                min={1}
+                max={5000}
+                value={editMaxDaily}
+                onChange={(e) => setEditMaxDaily(Number(e.target.value || 1))}
+                className="field-input"
+              />
+            </label>
+            <label className="field-block">
+              <span className="font-medium text-gray-700 text-sm">Contact Form Strategy</span>
+              <p className="text-xs text-gray-400 mb-1">How should outreach find the contact form?</p>
+              <select
+                value={editSearchForForm ? "search" : "exact"}
+                onChange={(e) => setEditSearchForForm(e.target.value === "search")}
+                className="field-input"
+              >
+                <option value="exact">Use exact URL provided — contact form is directly at that URL</option>
+                <option value="search">Search entire domain — outreach will look for contact page</option>
+              </select>
+            </label>
+            <label className="field-block full">
+              <span className="font-medium text-gray-700 text-sm">AI Instruction (Step 1 / Main)</span>
+              <textarea
+                value={editAiInstruction}
+                onChange={(e) => setEditAiInstruction(e.target.value)}
+                rows={8}
+                className="field-input field-textarea field-textarea-lg"
+                placeholder="Describe what the AI should write when filling out contact forms..."
+              />
+            </label>
+
+            {/* Steps preview */}
+            {stepsLocal.filter(s => s.trim()).length > 0 && (
+              <div className="full">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-medium text-gray-700">Follow-up Steps ({stepsLocal.filter(s => s.trim()).length})</p>
+                  <button
+                    type="button"
+                    onClick={() => { setStepsLocal(campaign.steps || []); setShowStepsModal(true); }}
+                    className="text-xs text-blue-600 hover:text-blue-800"
+                  >
+                    Edit Steps
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {stepsLocal.filter(s => s.trim()).map((step, i) => (
+                    <div key={i} className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 flex gap-2">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-purple-100 text-purple-700 text-xs font-bold flex items-center justify-center">{i + 2}</span>
+                      <span className="truncate">{step}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="full">
+              <button
+                type="button"
+                onClick={() => void saveSettings()}
+                disabled={savingSettings}
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {savingSettings ? "Saving..." : "Save Settings"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
