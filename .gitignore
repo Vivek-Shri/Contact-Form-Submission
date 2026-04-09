@@ -3,12 +3,13 @@ __pycache__/
 *.pyc
 .outreach-runs/
 .local_backup/
+dashboard/.next/
 dashboard/node_modules/
-frontend_cf/dashboard/node_modules/
 .env
 .env.local
 .DS_Store
 *.log
 api/__pycache__/
-frontend_cf/__pycache__/
-frontend_cf/api/__pycache__/
+.venv/
+dist/
+build/
