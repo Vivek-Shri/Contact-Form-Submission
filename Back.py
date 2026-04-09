@@ -51,7 +51,7 @@ SOCIAL_MEDIA_DOMAINS = {
 }
 
 
-DEFAULT_DATABASE_URL = "postgresql://postgres:6?9H#@Dv5W+VTEZ@db.rhmqhrjbknazyflmbwbv.supabase.co:5432/postgres"
+DEFAULT_DATABASE_URL = "postgresql://postgres:6%3F9H%23%40Dv5W%2BVTEZ@db.rhmqhrjbknazyflmbwbv.supabase.co:5432/postgres"
 
 def _resolve_database_url() -> str:
 	for key in ("DATABASE_URL", "DATABASE_STRING", "POSTGRES_URL", "SUPABASE_DB_URL"):
