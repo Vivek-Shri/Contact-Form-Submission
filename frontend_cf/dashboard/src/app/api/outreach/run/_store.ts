@@ -20,13 +20,9 @@ export interface RunPersonaInput {
   jobTitle?: string;
   professionalEmail?: string;
   verifiedPhone?: string;
-  internationalPhone?: string;
-  phoneDisplay?: string;
   company?: string;
   website?: string;
   zipCode?: string;
-  address?: string;
-  titleTemplate?: string;
   pitchMessage?: string;
 }
 
@@ -52,6 +48,9 @@ export interface OutreachRunSnapshot {
   logs: string[];
   results: RunResultRow[];
   duplicatesSkipped: number;
+  resumeSkippedLeads: number;
+  socialSkippedLeads: number;
+  resumedFromRunId?: string;
   captchaCreditsUsedToday: number;
   captchaCreditsLimit: number;
   captchaCreditsRemaining: number;
@@ -79,14 +78,10 @@ interface SenderContext {
   fullName: string;
   professionalEmail: string;
   verifiedPhone: string;
-  internationalPhone: string;
-  phoneDisplay: string;
   company: string;
   website: string;
   zipCode: string;
-  address: string;
   jobTitle: string;
-  titleTemplate: string;
   pitchMessage: string;
 }
 
@@ -172,6 +167,9 @@ function toSnapshot(job: OutreachRunJob): OutreachRunSnapshot {
     logs: job.logs,
     results: job.results,
     duplicatesSkipped: job.duplicatesSkipped,
+    resumeSkippedLeads: job.resumeSkippedLeads,
+    socialSkippedLeads: job.socialSkippedLeads,
+    resumedFromRunId: job.resumedFromRunId,
     captchaCreditsUsedToday: job.captchaCreditsUsedToday,
     captchaCreditsLimit: job.captchaCreditsLimit,
     captchaCreditsRemaining: job.captchaCreditsRemaining,
@@ -420,78 +418,36 @@ function buildSenderContext(persona: RunPersonaInput): SenderContext {
     extractInstructionField(aiInstruction, "Pitch Message") ||
     extractedTemplate;
 
-  const professionalEmail =
-    persona.professionalEmail?.trim() ||
-    extractInstructionField(aiInstruction, "Professional Email") ||
-    extractInstructionField(aiInstruction, "Email");
-
-  const verifiedPhone =
-    persona.verifiedPhone?.trim() ||
-    extractInstructionField(aiInstruction, "Verified Phone") ||
-    extractInstructionField(aiInstruction, "Phone");
-
-  const internationalPhone =
-    persona.internationalPhone?.trim() ||
-    extractInstructionField(aiInstruction, "International Phone") ||
-    extractInstructionField(aiInstruction, "Phone Intl") ||
-    extractInstructionField(aiInstruction, "Phone International") ||
-    verifiedPhone;
-
-  const phoneDisplay =
-    persona.phoneDisplay?.trim() ||
-    extractInstructionField(aiInstruction, "Phone Display") ||
-    extractInstructionField(aiInstruction, "Display Phone") ||
-    internationalPhone ||
-    verifiedPhone;
-
-  const company =
-    persona.company?.trim() ||
-    extractInstructionField(aiInstruction, "Company") ||
-    extractInstructionField(aiInstruction, "Sender Company") ||
-    "Outreach Team";
-
-  const website =
-    persona.website?.trim() ||
-    extractInstructionField(aiInstruction, "Website") ||
-    extractInstructionField(aiInstruction, "Company Website");
-
-  const zipCode =
-    persona.zipCode?.trim() ||
-    extractInstructionField(aiInstruction, "Zip Code") ||
-    extractInstructionField(aiInstruction, "PIN Code");
-
-  const address =
-    persona.address?.trim() ||
-    extractInstructionField(aiInstruction, "Address") ||
-    extractInstructionField(aiInstruction, "Location");
-
-  const jobTitle =
-    persona.jobTitle?.trim() ||
-    extractInstructionField(aiInstruction, "Job Title") ||
-    extractInstructionField(aiInstruction, "Sender Role") ||
-    "Outreach Specialist";
-
-  const titleTemplate =
-    persona.titleTemplate?.trim() ||
-    extractInstructionField(aiInstruction, "Email Subject") ||
-    extractInstructionField(aiInstruction, "Subject Line") ||
-    extractInstructionField(aiInstruction, "Title Template") ||
-    "Virtual Assistant Support for {company_name} - {MY_COMPANY}";
-
   return {
     firstName,
     lastName,
     fullName,
-    professionalEmail,
-    verifiedPhone,
-    internationalPhone,
-    phoneDisplay,
-    company,
-    website,
-    zipCode,
-    address,
-    jobTitle,
-    titleTemplate,
+    professionalEmail:
+      persona.professionalEmail?.trim() ||
+      extractInstructionField(aiInstruction, "Professional Email") ||
+      extractInstructionField(aiInstruction, "Email"),
+    verifiedPhone:
+      persona.verifiedPhone?.trim() ||
+      extractInstructionField(aiInstruction, "Verified Phone") ||
+      extractInstructionField(aiInstruction, "Phone"),
+    company:
+      persona.company?.trim() ||
+      extractInstructionField(aiInstruction, "Company") ||
+      extractInstructionField(aiInstruction, "Sender Company") ||
+      "Outreach Team",
+    website:
+      persona.website?.trim() ||
+      extractInstructionField(aiInstruction, "Website") ||
+      extractInstructionField(aiInstruction, "Company Website"),
+    zipCode:
+      persona.zipCode?.trim() ||
+      extractInstructionField(aiInstruction, "Zip Code") ||
+      extractInstructionField(aiInstruction, "PIN Code"),
+    jobTitle:
+      persona.jobTitle?.trim() ||
+      extractInstructionField(aiInstruction, "Job Title") ||
+      extractInstructionField(aiInstruction, "Sender Role") ||
+      "Outreach Specialist",
     // Never pass full AI instructions as message body.
     pitchMessage: resolvedPitch,
   };
@@ -736,37 +692,21 @@ function cleanupFinishedJobs(): void {
 }
 
 function toPersonaEnv(persona: RunPersonaInput, sender: SenderContext): Record<string, string> {
-  const titleTemplate =
-    sender.titleTemplate || "Virtual Assistant Support for {company_name} - {MY_COMPANY}";
-
   return {
     MY_FIRST_NAME: sender.firstName,
     MY_LAST_NAME: sender.lastName,
     MY_FULL_NAME: sender.fullName,
     MY_EMAIL: sender.professionalEmail,
     MY_PHONE: sender.verifiedPhone,
-    MY_PHONE_INTL: sender.internationalPhone,
-    MY_PHONE_DISPLAY: sender.phoneDisplay,
+    MY_PHONE_DISPLAY: sender.verifiedPhone,
     MY_COMPANY: sender.company,
     MY_WEBSITE: sender.website,
     MY_PIN_CODE: sender.zipCode,
-    MY_ADDRESS: sender.address,
     MY_JOB_TITLE: sender.jobTitle,
-    MY_TITLE: titleTemplate,
+    MY_TITLE: `${sender.jobTitle || "Outreach"} for {company_name} — ${sender.company}`.trim(),
     PITCH_MESSAGE: sender.pitchMessage,
     CAMPAIGN_ID: persona.id,
   };
-}
-
-function compactEnv(env: Record<string, string>): Record<string, string> {
-  const compacted: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    const trimmed = String(value ?? "").trim();
-    if (trimmed) {
-      compacted[key] = trimmed;
-    }
-  }
-  return compacted;
 }
 
 async function removeCsvFile(csvPath: string): Promise<void> {
@@ -795,6 +735,49 @@ export function getOutreachRunSnapshot(runId: string): OutreachRunSnapshot | nul
   return toSnapshot(job);
 }
 
+function stopChildProcessTree(child: ChildProcess | undefined): void {
+  if (!child) {
+    return;
+  }
+
+  const pid = child.pid;
+  if (!pid) {
+    return;
+  }
+
+  try {
+    child.kill("SIGINT");
+  } catch {
+    // ignored
+  }
+
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // ignored
+  }
+
+  if (process.platform === "win32") {
+    // On Windows, force-kill the entire process tree to ensure Playwright + Python exit.
+    try {
+      const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.unref();
+    } catch {
+      // ignored
+    }
+    return;
+  }
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // ignored
+  }
+}
+
 export function stopOutreachRun(runId: string): OutreachRunSnapshot | null {
   const job = runJobs.get(runId);
   if (!job) {
@@ -805,21 +788,23 @@ export function stopOutreachRun(runId: string): OutreachRunSnapshot | null {
     job.status = "stopped";
     job.endedAt = new Date().toISOString();
     pushLog(job, "[Runner] Stop requested by operator.");
-
-    try {
-      job.child?.kill("SIGINT");
-    } catch {
-      // ignored
-    }
-
-    try {
-      job.child?.kill();
-    } catch {
-      // ignored
-    }
+    stopChildProcessTree(job.child);
   }
 
   return toSnapshot(job);
+}
+
+export function stopActiveOutreachRun(): OutreachRunSnapshot | null {
+  cleanupFinishedJobs();
+  const active = Array.from(runJobs.values()).find(
+    (job) => job.status === "running" || job.status === "queued",
+  );
+
+  if (!active) {
+    return null;
+  }
+
+  return stopOutreachRun(active.runId);
 }
 
 export async function startOutreachRun(
@@ -923,7 +908,7 @@ export async function startOutreachRun(
     cwd: workspaceRoot,
     env: {
       ...process.env,
-      ...compactEnv(toPersonaEnv(persona, senderContext)),
+      ...toPersonaEnv(persona, senderContext),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -938,6 +923,9 @@ export async function startOutreachRun(
     logs: [],
     results: [],
     duplicatesSkipped,
+    resumeSkippedLeads: 0,
+    socialSkippedLeads: 0,
+    resumedFromRunId: undefined,
     captchaCreditsUsedToday,
     captchaCreditsLimit: DEFAULT_CAPTCHA_CREDIT_LIMIT,
     captchaCreditsRemaining,

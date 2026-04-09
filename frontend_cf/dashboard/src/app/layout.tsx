@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Manrope } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
+const manrope = Manrope({
+  variable: "--font-manrope",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
-  title: "Contact Form Automation",
-  description: "Premium SaaS dashboard for AI-powered outreach automation.",
+  title: "Outreach Studio Dashboard",
+  description: "Route-first campaign and contact management connected to backend APIs.",
 };
 
 export default function RootLayout({
@@ -18,5 +18,9 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return <html lang="en" className={`${inter.variable} h-full antialiased`}><body className="min-h-full flex flex-col">{children}</body></html>;
+  return (
+    <html lang="en" className={`${manrope.variable} h-full antialiased`}>
+      <body className="min-h-full">{children}</body>
+    </html>
+  );
 }

@@ -1,6 +1,6 @@
 import type { OutreachRunSnapshot, RunResultRow, RunStatus } from "./_store";
 
-const LOCAL_BACKEND_URL = "http://127.0.0.1:8000";
+const LOCAL_BACKEND_URL = "http://64.227.188.12:8001";
 const LOG_TAIL = 800;
 
 type RuntimeEnv = Record<string, string | undefined>;
@@ -217,6 +217,22 @@ export function toDashboardSnapshot(
         toNumber(statusPayload.duplicates_skipped ?? statusPayload.duplicatesSkipped, 0),
       ),
     ),
+    resumeSkippedLeads: Math.max(
+      0,
+      Math.round(
+        toNumber(statusPayload.resume_skipped_leads ?? statusPayload.resumeSkippedLeads, 0),
+      ),
+    ),
+    socialSkippedLeads: Math.max(
+      0,
+      Math.round(
+        toNumber(statusPayload.social_skipped_leads ?? statusPayload.socialSkippedLeads, 0),
+      ),
+    ),
+    resumedFromRunId:
+      asString(statusPayload.resumed_from_run_id) ||
+      asString(statusPayload.resumedFromRunId) ||
+      undefined,
     captchaCreditsUsedToday: Math.max(
       0,
       Math.round(
@@ -258,6 +274,9 @@ export function buildSnapshotFromStartPayload(payload: Record<string, unknown>):
     current_lead: "-",
     results: [],
     duplicates_skipped: toNumber(payload.duplicates_skipped, 0),
+    resume_skipped_leads: toNumber(payload.resume_skipped_leads, 0),
+    social_skipped_leads: toNumber(payload.social_skipped_leads, 0),
+    resumed_from_run_id: asString(payload.resumed_from_run_id),
   };
 
   return toDashboardSnapshot(fallback, []);

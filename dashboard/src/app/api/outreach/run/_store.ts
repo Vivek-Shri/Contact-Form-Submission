@@ -48,6 +48,9 @@ export interface OutreachRunSnapshot {
   logs: string[];
   results: RunResultRow[];
   duplicatesSkipped: number;
+  resumeSkippedLeads: number;
+  socialSkippedLeads: number;
+  resumedFromRunId?: string;
   captchaCreditsUsedToday: number;
   captchaCreditsLimit: number;
   captchaCreditsRemaining: number;
@@ -164,6 +167,9 @@ function toSnapshot(job: OutreachRunJob): OutreachRunSnapshot {
     logs: job.logs,
     results: job.results,
     duplicatesSkipped: job.duplicatesSkipped,
+    resumeSkippedLeads: job.resumeSkippedLeads,
+    socialSkippedLeads: job.socialSkippedLeads,
+    resumedFromRunId: job.resumedFromRunId,
     captchaCreditsUsedToday: job.captchaCreditsUsedToday,
     captchaCreditsLimit: job.captchaCreditsLimit,
     captchaCreditsRemaining: job.captchaCreditsRemaining,
@@ -917,6 +923,9 @@ export async function startOutreachRun(
     logs: [],
     results: [],
     duplicatesSkipped,
+    resumeSkippedLeads: 0,
+    socialSkippedLeads: 0,
+    resumedFromRunId: undefined,
     captchaCreditsUsedToday,
     captchaCreditsLimit: DEFAULT_CAPTCHA_CREDIT_LIMIT,
     captchaCreditsRemaining,

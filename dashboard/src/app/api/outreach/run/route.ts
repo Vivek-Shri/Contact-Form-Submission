@@ -15,6 +15,8 @@ export const dynamic = "force-dynamic";
 interface StartRunRequestBody {
   persona?: RunPersonaInput;
   leads?: RunLeadInput[];
+  resume?: boolean;
+  resumeFromRunId?: string;
 }
 
 function isValidPersona(persona: unknown): persona is RunPersonaInput {
@@ -65,6 +67,10 @@ export async function POST(request: Request) {
   }
 
   const { persona, leads } = body;
+  const resumeFromRunIdRaw = body.resumeFromRunId;
+  const resume = body.resume === undefined ? true : body.resume;
+  const resumeFromRunId =
+    typeof resumeFromRunIdRaw === "string" ? resumeFromRunIdRaw.trim() : undefined;
 
   if (!isValidPersona(persona)) {
     return NextResponse.json({ error: "Invalid persona payload." }, { status: 400 });
@@ -72,6 +78,14 @@ export async function POST(request: Request) {
 
   if (!Array.isArray(leads) || !leads.every((lead) => isValidLead(lead))) {
     return NextResponse.json({ error: "Invalid leads payload." }, { status: 400 });
+  }
+
+  if (typeof resume !== "boolean") {
+    return NextResponse.json({ error: "Invalid resume flag." }, { status: 400 });
+  }
+
+  if (resumeFromRunIdRaw !== undefined && typeof resumeFromRunIdRaw !== "string") {
+    return NextResponse.json({ error: "Invalid resumeFromRunId payload." }, { status: 400 });
   }
 
   try {
@@ -85,6 +99,8 @@ export async function POST(request: Request) {
       body: JSON.stringify({
         persona,
         leads,
+        resume,
+        resume_from_run_id: resumeFromRunId || undefined,
       }),
     });
 

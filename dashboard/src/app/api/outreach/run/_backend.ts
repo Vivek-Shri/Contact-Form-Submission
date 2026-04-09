@@ -1,6 +1,6 @@
 import type { OutreachRunSnapshot, RunResultRow, RunStatus } from "./_store";
 
-const LOCAL_BACKEND_URL = "http://127.0.0.1:8000";
+const LOCAL_BACKEND_URL = "http://64.227.188.12:8001";
 const LOG_TAIL = 800;
 
 type RuntimeEnv = Record<string, string | undefined>;
@@ -180,7 +180,26 @@ export function toDashboardSnapshot(
   const runId = payloadRunId(statusPayload) || "unknown";
   const runningFlag = Boolean(statusPayload.running);
   const status = mapRunStatus(asString(statusPayload.status), runningFlag);
-  const results = collectResults(statusPayload.results);
+  const inlineLogs = collectLogs(statusPayload.logs);
+  const finalLogs = logs.length > 0 ? logs : inlineLogs;
+
+  const initialResults = collectResults(statusPayload.results);
+  
+  let parsedFromLogs: NonNullable<ReturnType<typeof normalizeResultRow>>[] = [];
+  if (initialResults.length === 0 && finalLogs.length > 0) {
+    parsedFromLogs = finalLogs
+      .filter(line => line.startsWith("[RESULT]"))
+      .map(line => {
+        try {
+          return normalizeResultRow(JSON.parse(line.substring(8).trim()));
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is NonNullable<ReturnType<typeof normalizeResultRow>> => r !== null);
+  }
+  
+  const results = initialResults.length > 0 ? initialResults : parsedFromLogs;
 
   const totalLeads = Math.max(0, toNumber(statusPayload.total_leads ?? statusPayload.totalLeads, results.length));
   const processedLeads = Math.max(
@@ -196,11 +215,7 @@ export function toDashboardSnapshot(
     Math.min(100, Math.round(toNumber(statusPayload.progress, computedProgress))),
   );
 
-  const inlineLogs = collectLogs(statusPayload.logs);
-  const finalLogs = logs.length > 0 ? logs : inlineLogs;
-
   const endedAt = asString(statusPayload.finished_at) || asString(statusPayload.ended_at) || asString(statusPayload.endedAt);
-
   return {
     runId,
     status,
@@ -217,6 +232,22 @@ export function toDashboardSnapshot(
         toNumber(statusPayload.duplicates_skipped ?? statusPayload.duplicatesSkipped, 0),
       ),
     ),
+    resumeSkippedLeads: Math.max(
+      0,
+      Math.round(
+        toNumber(statusPayload.resume_skipped_leads ?? statusPayload.resumeSkippedLeads, 0),
+      ),
+    ),
+    socialSkippedLeads: Math.max(
+      0,
+      Math.round(
+        toNumber(statusPayload.social_skipped_leads ?? statusPayload.socialSkippedLeads, 0),
+      ),
+    ),
+    resumedFromRunId:
+      asString(statusPayload.resumed_from_run_id) ||
+      asString(statusPayload.resumedFromRunId) ||
+      undefined,
     captchaCreditsUsedToday: Math.max(
       0,
       Math.round(
@@ -258,6 +289,9 @@ export function buildSnapshotFromStartPayload(payload: Record<string, unknown>):
     current_lead: "-",
     results: [],
     duplicates_skipped: toNumber(payload.duplicates_skipped, 0),
+    resume_skipped_leads: toNumber(payload.resume_skipped_leads, 0),
+    social_skipped_leads: toNumber(payload.social_skipped_leads, 0),
+    resumed_from_run_id: asString(payload.resumed_from_run_id),
   };
 
   return toDashboardSnapshot(fallback, []);

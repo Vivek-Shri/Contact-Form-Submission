@@ -1,0 +1,14 @@
+node_modules/
+__pycache__/
+*.pyc
+.outreach-runs/
+.local_backup/
+dashboard/node_modules/
+frontend_cf/dashboard/node_modules/
+.env
+.env.local
+.DS_Store
+*.log
+api/__pycache__/
+frontend_cf/__pycache__/
+frontend_cf/api/__pycache__/

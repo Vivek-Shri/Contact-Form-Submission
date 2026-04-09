@@ -1,0 +1,7 @@
+.next/dev/types/validator.ts(207,31): error TS2344: Type 'typeof import("C:/Users/shriv/skyvern/Frontend_cF/dashboard/src/app/api/contacts/[contactId]/route")' does not satisfy the constraint 'RouteHandlerConfig<"/api/contacts/[contactId]">'.
+  Types of property 'DELETE' are incompatible.
+    Type '(request: Request, { params }: { params: { contactId: string; }; }) => Promise<NextResponse<{ error: string; }> | NextResponse<{ success: boolean; }>>' is not assignable to type '(request: NextRequest, context: { params: Promise<{ contactId: string; }>; }) => void | Response | Promise<void | Response>'.
+      Types of parameters '__1' and 'context' are incompatible.
+        Type '{ params: Promise<{ contactId: string; }>; }' is not assignable to type '{ params: { contactId: string; }; }'.
+          Types of property 'params' are incompatible.
+            Property 'contactId' is missing in type 'Promise<{ contactId: string; }>' but required in type '{ contactId: string; }'.
