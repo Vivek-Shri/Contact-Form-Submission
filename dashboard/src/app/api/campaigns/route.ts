@@ -64,13 +64,13 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await backendJson(
-      "/api/campaigns",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
+      const result = await backendJson(
+        "/api/campaigns",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+        },
       { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
     );
 

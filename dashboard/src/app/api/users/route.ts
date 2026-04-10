@@ -12,15 +12,15 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // if (!(session.user as any).isAdmin) {
-  //   return NextResponse.json({ error: "Admin access required" }, { status: 403 });
-  // }
+  if (!(session.user as any).isAdmin) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+  }
 
   try {
     const result = await backendJson(
       "/api/users",
       { method: "GET" },
-      { userId: (session.user as any).id, isAdmin: true }
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
     );
 
     if (!result.ok) {

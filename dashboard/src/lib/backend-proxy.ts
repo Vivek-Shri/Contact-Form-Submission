@@ -41,6 +41,9 @@ export async function backendJson(
   if (init.body && typeof init.body === "object" && !(init.body instanceof FormData) && !(init.body instanceof URLSearchParams) && !(init.body instanceof Blob)) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(init.body);
+    console.log(`[DEBUG Proxy] ${init.method || "GET"} ${path} body length:`, (init.body as string).length);
+  } else {
+    console.log(`[DEBUG Proxy] ${init.method || "GET"} ${path} no object body`);
   }
 
   const response = await fetch(`${backendBaseUrl}${path}`, withNoStore({
@@ -48,6 +51,10 @@ export async function backendJson(
     headers
   }));
   const payload = await parseJsonSafe(response);
+
+  if (!response.ok) {
+    console.log(`[DEBUG Response] ${response.status} from ${path}:`, JSON.stringify(payload));
+  }
 
   return {
     ok: response.ok,
@@ -63,6 +70,21 @@ export function extractError(payload: unknown, fallback: string): string {
 
   const candidate = payload as Record<string, unknown>;
   const detail = candidate.detail;
+  
+  if (Array.isArray(detail)) {
+    // FastAPI validation error detail is often a list
+    const messages = detail.map(d => {
+      if (typeof d === 'string') return d;
+      if (d && typeof d === 'object') {
+        const msg = (d as any).msg || (d as any).message;
+        const loc = Array.isArray((d as any).loc) ? (d as any).loc.join('.') : '';
+        return loc ? `${loc}: ${msg}` : msg;
+      }
+      return JSON.stringify(d);
+    });
+    return messages.join('; ') || fallback;
+  }
+
   if (typeof detail === "string" && detail.trim()) {
     return detail.trim();
   }

@@ -12,17 +12,31 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const userId = (session.user as any).id;
+  const isAdmin = (session.user as any).isAdmin;
+
   try {
     const client = await pool.connect();
     try {
-      const { rows } = await client.query(`
+      let query = `
         SELECT l.list_id as id, l.name, l.created_at as "createdAt",
                COUNT(i.item_id) as "contactCount"
         FROM contact_lists l
         LEFT JOIN contact_list_items i ON l.list_id = i.list_id
+      `;
+      let params: any[] = [];
+
+      if (!isAdmin) {
+        query += " WHERE l.user_id = $1";
+        params.push(userId);
+      }
+
+      query += `
         GROUP BY l.list_id, l.name, l.created_at
         ORDER BY l.created_at DESC
-      `);
+      `;
+
+      const { rows } = await client.query(query, params);
       return NextResponse.json({ lists: rows }, { status: 200 });
     } finally {
       client.release();
@@ -38,6 +52,8 @@ export async function POST(request: Request) {
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const userId = (session.user as any).id;
 
   let body: any;
   try {
@@ -65,9 +81,9 @@ export async function POST(request: Request) {
       await client.query("BEGIN");
 
       await client.query(
-        `INSERT INTO contact_lists (list_id, name, created_at, updated_at)
-         VALUES ($1, $2, $3, $4)`,
-        [listId, name.trim(), now, now]
+        `INSERT INTO contact_lists (list_id, name, user_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [listId, name.trim(), userId, now, now]
       );
 
       if (Array.isArray(contacts) && contacts.length > 0) {

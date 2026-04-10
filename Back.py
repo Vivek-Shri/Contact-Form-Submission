@@ -163,7 +163,7 @@ def _init_db() -> None:
 						SELECT 1 FROM information_schema.columns
 						WHERE table_name = 'campaigns' AND column_name = 'user_id'
 					) THEN
-						ALTER TABLE campaigns ADD COLUMN user_id TEXT;
+						ALTER TABLE campaigns ADD COLUMN user_id INTEGER;
 					END IF;
 				END $$;
 			""")
@@ -174,7 +174,7 @@ def _init_db() -> None:
 						SELECT 1 FROM information_schema.columns
 						WHERE table_name = 'outreach_runs' AND column_name = 'user_id'
 					) THEN
-						ALTER TABLE outreach_runs ADD COLUMN user_id TEXT;
+						ALTER TABLE outreach_runs ADD COLUMN user_id INTEGER;
 					END IF;
 				END $$;
 			""")
@@ -185,7 +185,7 @@ def _init_db() -> None:
 						SELECT 1 FROM information_schema.columns
 						WHERE table_name = 'campaign_contacts' AND column_name = 'user_id'
 					) THEN
-						ALTER TABLE campaign_contacts ADD COLUMN user_id TEXT;
+						ALTER TABLE campaign_contacts ADD COLUMN user_id INTEGER;
 					END IF;
 				END $$;
 			""")
@@ -216,7 +216,7 @@ def _init_db() -> None:
 				CREATE TABLE IF NOT EXISTS contact_lists (
 					list_id TEXT PRIMARY KEY,
 					name TEXT NOT NULL,
-					user_id TEXT,
+					user_id INTEGER,
 					created_at TEXT,
 					updated_at TEXT
 				)
@@ -239,9 +239,9 @@ def _init_db() -> None:
 			cur.execute("""
 				DO $$
 				DECLARE
-					admin_id TEXT;
+					admin_id INTEGER;
 				BEGIN
-					SELECT CAST(id AS TEXT) INTO admin_id FROM users WHERE is_admin = TRUE LIMIT 1;
+					SELECT id INTO admin_id FROM users WHERE is_admin = TRUE LIMIT 1;
 					IF admin_id IS NOT NULL THEN
 						UPDATE campaigns SET user_id = admin_id WHERE user_id IS NULL;
 						UPDATE outreach_runs SET user_id = admin_id WHERE user_id IS NULL;
@@ -1718,8 +1718,9 @@ def create_campaign_contact(request: Request, campaign_id: str, payload: Campaig
 
 @app.post("/campaigns/{campaign_id}/contacts/bulk")
 @app.post("/api/campaigns/{campaign_id}/contacts/bulk")
-def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateRequest) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: BulkContactsCreateRequest = Body(...)) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 	
@@ -1757,7 +1758,8 @@ def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateR
 			_safe_trim(item.get("industry")),
 			_safe_trim(item.get("notes")),
 			now,
-			now
+			now,
+			user_id
 		))
 	
 	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -1773,7 +1775,7 @@ def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateR
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
+					location, industry, notes, created_at, updated_at, user_id
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
 			""", docs_to_insert, page_size=1000)
@@ -2000,7 +2002,7 @@ def delete_all_contacts(request: Request) -> dict:
 
 
 @app.post("/api/contacts/bulk")
-def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest) -> dict:
+def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = Body(...)) -> dict:
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 	
@@ -2680,8 +2682,8 @@ def delete_contact_list(request: Request, list_id: str) -> dict:
 def list_users(request: Request) -> dict:
 	"""List all users. Admin only."""
 	user_id, is_admin = _get_user_context(request)
-	# if not is_admin:
-	# 	raise HTTPException(status_code=403, detail="Admin access required")
+	if not is_admin:
+		raise HTTPException(status_code=403, detail="Admin access required")
 
 	conn = _db_get_conn()
 	try:
@@ -2710,8 +2712,8 @@ def list_users(request: Request) -> dict:
 def update_user_role(request: Request, target_user_id: str, body: dict = Body(...)) -> dict:
 	"""Update a user's role. Admin only."""
 	user_id, is_admin = _get_user_context(request)
-	# if not is_admin:
-	# 	raise HTTPException(status_code=403, detail="Admin access required")
+	if not is_admin:
+		raise HTTPException(status_code=403, detail="Admin access required")
 
 	new_role = body.get("role", "").lower()
 	if new_role not in ("admin", "user"):
@@ -2753,8 +2755,8 @@ def update_user_role(request: Request, target_user_id: str, body: dict = Body(..
 def delete_user(request: Request, target_user_id: str) -> dict:
 	"""Delete a user. Admin only. Cannot delete yourself."""
 	user_id, is_admin = _get_user_context(request)
-	# if not is_admin:
-	# 	raise HTTPException(status_code=403, detail="Admin access required")
+	if not is_admin:
+		raise HTTPException(status_code=403, detail="Admin access required")
 
 	if str(target_user_id) == str(user_id):
 		raise HTTPException(status_code=400, detail="You cannot delete yourself")

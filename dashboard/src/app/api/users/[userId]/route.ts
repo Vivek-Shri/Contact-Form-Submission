@@ -29,11 +29,11 @@ export async function PUT(request: Request, { params }: { params: Promise<Params
 
   try {
     const result = await backendJson(
-      `/api/users/${encodeURIComponent(userId)}`,
+      `/api/users/${userId}/role`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: body,
       },
       { userId: (session.user as any).id, isAdmin: true }
     );

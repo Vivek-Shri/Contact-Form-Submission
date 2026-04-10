@@ -69,7 +69,8 @@ export default function UsersPage() {
   useEffect(() => {
     if (status === "authenticated") {
       if (!isAdmin) {
-        // Disabled admin check as per user request
+        router.replace("/overview");
+        return;
       }
       void loadUsers();
     }

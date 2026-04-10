@@ -24,10 +24,14 @@ export async function POST(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: body,
       },
       { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
     );
+
+    if (!result.ok) {
+      console.log(`[DEBUG Bulk] Backend error ${result.status}:`, JSON.stringify(result.payload));
+    }
 
     if (!result.ok) {
       return NextResponse.json(

@@ -16,16 +16,24 @@ export async function GET(request: Request, { params }: { params: Promise<Params
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const userId = (session.user as any).id;
+  const isAdmin = (session.user as any).isAdmin;
+
   const { listId } = await params;
   try {
     const client = await pool.connect();
     try {
       const { rows: listRows } = await client.query(
-        "SELECT list_id, name FROM contact_lists WHERE list_id = $1",
+        "SELECT list_id, name, user_id FROM contact_lists WHERE list_id = $1",
         [listId]
       );
       if (listRows.length === 0) {
         return NextResponse.json({ error: "List not found" }, { status: 404 });
+      }
+
+      const listOwnerId = listRows[0].user_id;
+      if (!isAdmin && listOwnerId && String(listOwnerId) !== String(userId)) {
+        return NextResponse.json({ error: "Forbidden: You do not own this list" }, { status: 403 });
       }
 
       const { rows: items } = await client.query(
@@ -50,6 +58,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<Para
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const userId = (session.user as any).id;
+  const isAdmin = (session.user as any).isAdmin;
+
   const { listId } = await params;
   let body: any;
   try {
@@ -67,11 +78,16 @@ export async function PATCH(request: Request, { params }: { params: Promise<Para
     const client = await pool.connect();
     try {
       const { rows: listRows } = await client.query(
-        "SELECT list_id FROM contact_lists WHERE list_id = $1",
+        "SELECT list_id, user_id FROM contact_lists WHERE list_id = $1",
         [listId]
       );
       if (listRows.length === 0) {
         return NextResponse.json({ error: "List not found" }, { status: 404 });
+      }
+
+      const listOwnerId = listRows[0].user_id;
+      if (!isAdmin && listOwnerId && String(listOwnerId) !== String(userId)) {
+        return NextResponse.json({ error: "Forbidden: You do not own this list" }, { status: 403 });
       }
 
       const now = new Date().toISOString();
@@ -110,16 +126,24 @@ export async function DELETE(request: Request, { params }: { params: Promise<Par
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const userId = (session.user as any).id;
+  const isAdmin = (session.user as any).isAdmin;
+
   const { listId } = await params;
   try {
     const client = await pool.connect();
     try {
       const { rows: listRows } = await client.query(
-        "SELECT list_id FROM contact_lists WHERE list_id = $1",
+        "SELECT list_id, user_id FROM contact_lists WHERE list_id = $1",
         [listId]
       );
       if (listRows.length === 0) {
         return NextResponse.json({ error: "List not found" }, { status: 404 });
+      }
+
+      const listOwnerId = listRows[0].user_id;
+      if (!isAdmin && listOwnerId && String(listOwnerId) !== String(userId)) {
+        return NextResponse.json({ error: "Forbidden: You do not own this list" }, { status: 403 });
       }
 
       await client.query("BEGIN");

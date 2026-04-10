@@ -97,7 +97,7 @@ export default function OverviewPage() {
               else if (data.exit_code !== undefined && data.exit_code !== null) status = "failed";
               else status = "stopped";
             }
-            
+
             setLiveRun({
               runId: data.run_id,
               status: status,

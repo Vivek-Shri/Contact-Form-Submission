@@ -123,6 +123,24 @@ export default function CampaignDetailPage() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [availableLists, setAvailableLists] = useState<ContactList[]>([]);
   const [importingListId, setImportingListId] = useState<string | null>(null);
+  /* Load lists for import */
+  const refreshLists = useCallback(async () => {
+    try {
+      const res = await fetch("/api/contact-lists");
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableLists(data.lists || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch lists", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLists();
+  }, [refreshLists]);
+
+  const runActive = !!runSnapshot && isActiveRun(runSnapshot.status);
 
   /* ─── Detail modal ───────────────────────────────────────── */
   const [selectedDetail, setSelectedDetail] = useState<{
@@ -414,8 +432,22 @@ export default function CampaignDetailPage() {
     setImportingListId(list.id);
     setMessage("");
     try {
-      const existingUrls = new Set(contacts.map(c => normUrl(c.contactUrl)));
-      const duplicates = list.contacts.filter(item => existingUrls.has(normUrl(item.contactUrl)));
+      let listContacts = list.contacts;
+      // If contacts aren't pre-loaded (new lightweight API), fetch them now
+      if (!listContacts || listContacts.length === 0) {
+        const detailRes = await fetch(`/api/contact-lists/${list.id}`);
+        if (!detailRes.ok) {
+          const errData = await detailRes.json();
+          throw new Error(errData.error || "Failed to load list details");
+        }
+        const detailData = await detailRes.json();
+        listContacts = detailData.contacts;
+      }
+      if (!listContacts) throw new Error("List contacts not found");
+
+      const currentContacts = contacts || [];
+      const existingUrls = new Set(currentContacts.map(c => normUrl(c.contactUrl)));
+      const duplicates = listContacts.filter(item => existingUrls.has(normUrl(item.contactUrl)));
       if (duplicates.length > 0) {
         if (!window.confirm(`Warning: ${duplicates.length} duplicate URLs are already in this campaign. Want to proceed?`)) {
           setImportingListId(null);
@@ -424,9 +456,11 @@ export default function CampaignDetailPage() {
       }
 
       const payload = {
-        contacts: list.contacts.map(item => ({
+        contacts: listContacts.map(item => ({
           companyName: item.companyName || "Unknown",
-          contactUrl: item.contactUrl
+          company_name: item.companyName || "Unknown",
+          contactUrl: item.contactUrl,
+          contact_url: item.contactUrl
         }))
       };
 
@@ -522,25 +556,6 @@ export default function CampaignDetailPage() {
 
   if (loading) return <p className="panel-muted" style={{ padding: "2rem" }}>Loading campaign...</p>;
   if (error || !campaign) return <p className="panel-error" style={{ padding: "2rem" }}>{error || "Campaign not found."}</p>;
-
-  /* Load lists for import */
-  const refreshLists = useCallback(async () => {
-    try {
-      const res = await fetch("/api/contact-lists");
-      if (res.ok) {
-        const data = await res.json();
-        setAvailableLists(data.lists || []);
-      }
-    } catch (err) {
-      console.error("Failed to fetch lists", err);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshLists();
-  }, [refreshLists]);
-
-  const runActive = !!runSnapshot && isActiveRun(runSnapshot.status);
 
   return (
     <div className="page-stack">
@@ -685,7 +700,7 @@ export default function CampaignDetailPage() {
                     <div key={list.id} className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
                       <div>
                         <p className="font-medium text-gray-900 text-sm">{list.name}</p>
-                        <p className="text-xs text-gray-500">{list.contacts.length} contacts · {new Date(list.createdAt).toLocaleDateString()}</p>
+                        <p className="text-xs text-gray-500">{(list as any).contactCount || 0} contacts · {new Date(list.createdAt).toLocaleDateString()}</p>
                       </div>
                       <button
                         type="button"
