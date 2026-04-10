@@ -1,7 +1,8 @@
 "use client";
 
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   Users,
   Activity,
@@ -36,18 +37,13 @@ import { formatDateTime, statusTone } from "@/lib/ui";
 /* ─── Local List Types ─────────────────────────────────────── */
 interface ListContact { companyName: string; contactUrl: string; }
 interface ContactList { id: string; name: string; contacts: ListContact[]; createdAt: string; }
-const LS_KEY = "outreach-contact-lists";
-function loadLists(): ContactList[] {
-  try { const raw = localStorage.getItem(LS_KEY); return raw ? (JSON.parse(raw) as ContactList[]) : []; }
-  catch { return []; }
-}
 
 /* ─── Types ────────────────────────────────────────────────── */
 interface CampaignContactsResponse { contacts: ContactRecord[]; }
 interface CampaignRunsResponse { runs: CampaignRunSummary[]; }
 
 const RUN_POLL_INTERVAL_MS = 2500;
-type Tab = "contacts" | "activity" | "settings";
+type Tab = "contacts" | "activity" | "results" | "editor" | "settings";
 type FilterMode = "all" | "success" | "fail" | "pending" | "warning";
 
 function isActiveRun(status: string) {
@@ -80,6 +76,9 @@ const normUrl = (url?: string) => {
 };
 
 export default function CampaignDetailPage() {
+  const { data: session } = useSession();
+  const userId = (session?.user as any)?.id || "";
+
   const router = useRouter();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId;
@@ -93,7 +92,17 @@ export default function CampaignDetailPage() {
   const [message, setMessage] = useState("");
 
   /* ─── Tab ─────────────────────────────────────────────────── */
-  const [activeTab, setActiveTab] = useState<Tab>("contacts");
+  const searchParams = useSearchParams();
+  const initialTab = searchParams.get("tab") as Tab | null;
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab || "contacts");
+
+  // Sync tab if URL changes (optional but good for back/forward)
+  useEffect(() => {
+    const tab = searchParams.get("tab") as Tab | null;
+    if (tab && ["contacts", "activity", "results", "editor", "settings"].includes(tab)) {
+      setActiveTab(tab);
+    }
+  }, [searchParams]);
 
   /* ─── Run ─────────────────────────────────────────────────── */
   const [runSnapshot, setRunSnapshot] = useState<OutreachRunSnapshot | null>(null);
@@ -129,8 +138,9 @@ export default function CampaignDetailPage() {
 
   /* ─── Add Steps modal ─────────────────────────────────────── */
   const [showStepsModal, setShowStepsModal] = useState(false);
-  const [stepsLocal, setStepsLocal] = useState<string[]>([]);
+  const [stepsLocal, setStepsLocal] = useState<CampaignRecord["steps"]>([]);
   const [savingSteps, setSavingSteps] = useState(false);
+  const [expandedStepIndex, setExpandedStepIndex] = useState<number | null>(null);
 
   /* ─── Settings state ──────────────────────────────────────── */
   const [editName, setEditName] = useState("");
@@ -138,6 +148,7 @@ export default function CampaignDetailPage() {
   const [editMaxDaily, setEditMaxDaily] = useState(100);
   const [editAiInstruction, setEditAiInstruction] = useState("");
   const [editSearchForForm, setEditSearchForForm] = useState(false);
+  const [editBreakFlag, setEditBreakFlag] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
   /* ─── Contact results map ─────────────────────────────────── */
@@ -232,7 +243,8 @@ export default function CampaignDetailPage() {
       setEditMaxDaily(cData.maxDailySubmissions);
       setEditAiInstruction(cData.aiInstruction || "");
       setEditSearchForForm(cData.searchForForm || false);
-      setStepsLocal(cData.steps || []);
+      setEditBreakFlag(cData.breakFlag || false);
+      setStepsLocal(Array.isArray(cData.steps) ? cData.steps : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load campaign.");
     } finally {
@@ -268,20 +280,21 @@ export default function CampaignDetailPage() {
 
   /* ─── Restore run snapshot ────────────────────────────────── */
   useEffect(() => {
+    if (!userId) return;
     try {
-      const saved = localStorage.getItem(`run-snapshot-${campaignId}`);
+      const saved = localStorage.getItem(`run-snapshot-${userId}-${campaignId}`);
       if (saved) {
         const snap = JSON.parse(saved) as OutreachRunSnapshot;
         if (snap?.runId) setRunSnapshot(snap);
       }
     } catch { /* ignore */ }
-  }, [campaignId]);
+  }, [campaignId, userId]);
 
   useEffect(() => {
-    if (!runSnapshot) return;
-    try { localStorage.setItem(`run-snapshot-${campaignId}`, JSON.stringify(runSnapshot)); }
+    if (!runSnapshot || !userId) return;
+    try { localStorage.setItem(`run-snapshot-${userId}-${campaignId}`, JSON.stringify(runSnapshot)); }
     catch { /* ignore */ }
-  }, [runSnapshot, campaignId]);
+  }, [runSnapshot, campaignId, userId]);
 
   /* ─── Poll active run ─────────────────────────────────────── */
   useEffect(() => {
@@ -289,6 +302,12 @@ export default function CampaignDetailPage() {
     const timer = globalThis.setInterval(async () => {
       try {
         const res = await fetch(`/api/outreach/run?runId=${encodeURIComponent(runSnapshot.runId)}`, { cache: "no-store" });
+        if (res.status === 404) {
+          // Run no longer exists on backend — stop polling
+          setRunSnapshot(prev => prev ? { ...prev, status: "completed" as OutreachRunSnapshot["status"] } : prev);
+          void loadCampaignBundle();
+          return;
+        }
         const payload = await res.json() as OutreachRunSnapshot | { error?: string };
         if (!res.ok || !("runId" in payload)) return;
         setRunSnapshot(payload);
@@ -391,9 +410,19 @@ export default function CampaignDetailPage() {
   }, [campaignId]);
 
   const importFromList = useCallback(async (list: ContactList) => {
+    if (!userId) return;
     setImportingListId(list.id);
     setMessage("");
     try {
+      const existingUrls = new Set(contacts.map(c => normUrl(c.contactUrl)));
+      const duplicates = list.contacts.filter(item => existingUrls.has(normUrl(item.contactUrl)));
+      if (duplicates.length > 0) {
+        if (!window.confirm(`Warning: ${duplicates.length} duplicate URLs are already in this campaign. Want to proceed?`)) {
+          setImportingListId(null);
+          return;
+        }
+      }
+
       const payload = {
         contacts: list.contacts.map(item => ({
           companyName: item.companyName || "Unknown",
@@ -423,17 +452,19 @@ export default function CampaignDetailPage() {
     setSavingSettings(true);
     setMessage("");
     try {
+      const body = {
+        name: editName,
+        status: editStatus,
+        maxDailySubmissions: editMaxDaily,
+        aiInstruction: editAiInstruction,
+        searchForForm: editSearchForForm,
+        breakFlag: editBreakFlag,
+        steps: stepsLocal,
+      };
       const res = await fetch(`/api/campaigns/${campaign.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: editName.trim(),
-          status: editStatus,
-          maxDailySubmissions: Math.max(1, Math.round(editMaxDaily || 1)),
-          aiInstruction: editAiInstruction,
-          searchForForm: editSearchForForm,
-          steps: stepsLocal,
-        }),
+        body: JSON.stringify(body),
       });
       const payload = await res.json() as CampaignRecord | { error?: string };
       if (!res.ok || !("id" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to update."); return; }
@@ -442,22 +473,26 @@ export default function CampaignDetailPage() {
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Unable to update.");
     } finally { setSavingSettings(false); }
-  }, [campaign, editName, editStatus, editMaxDaily, editAiInstruction, editSearchForForm, stepsLocal]);
+  }, [campaign, editName, editStatus, editMaxDaily, editAiInstruction, editSearchForForm, editBreakFlag, stepsLocal]);
 
   const saveSteps = useCallback(async () => {
     if (!campaign) return;
     setSavingSteps(true);
     try {
+      // Ensure we only send valid step objects
+      const cleanSteps = stepsLocal.map(s => {
+        if (typeof s === "string") return { id: Date.now().toString(), aiInstruction: s, daySequence: 1, timeOfDay: "09:00", type: "immediate", enabled: true };
+        return { id: s.id || Date.now().toString(), aiInstruction: s.aiInstruction || "", daySequence: s.daySequence || 1, timeOfDay: s.timeOfDay || "09:00", type: s.type || "immediate", enabled: s.enabled !== false };
+      });
       const res = await fetch(`/api/campaigns/${campaign.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ steps: stepsLocal }),
+        body: JSON.stringify({ steps: cleanSteps }),
       });
       const payload = await res.json() as CampaignRecord | { error?: string };
       if (!res.ok || !("id" in payload)) { setMessage(("error" in payload && payload.error) || "Unable to save steps."); return; }
       setCampaign(payload);
-      setStepsLocal(payload.steps || []);
-      setShowStepsModal(false);
+      setStepsLocal(Array.isArray(payload.steps) ? payload.steps : []);
       setMessage("Steps saved.");
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Unable to save steps.");
@@ -487,6 +522,23 @@ export default function CampaignDetailPage() {
 
   if (loading) return <p className="panel-muted" style={{ padding: "2rem" }}>Loading campaign...</p>;
   if (error || !campaign) return <p className="panel-error" style={{ padding: "2rem" }}>{error || "Campaign not found."}</p>;
+
+  /* Load lists for import */
+  const refreshLists = useCallback(async () => {
+    try {
+      const res = await fetch("/api/contact-lists");
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableLists(data.lists || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch lists", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLists();
+  }, [refreshLists]);
 
   const runActive = !!runSnapshot && isActiveRun(runSnapshot.status);
 
@@ -611,63 +663,7 @@ export default function CampaignDetailPage() {
         );
       })()}
 
-      {/* ─── Add Steps Modal ──────────────────────────────────── */}
-      {showStepsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl flex flex-col max-h-[90vh]">
-            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 shrink-0">
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">Campaign Steps</h3>
-                <p className="text-xs text-gray-500 mt-0.5">Add separate AI instructions for follow-up steps using the same contacts.</p>
-              </div>
-              <button onClick={() => setShowStepsModal(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={20} /></button>
-            </div>
-            <div className="p-6 overflow-y-auto flex-1 space-y-4">
-              {stepsLocal.map((step, i) => (
-                <div key={i} className="flex gap-3 items-start">
-                  <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center shrink-0 mt-1">
-                    {i + 1}
-                  </div>
-                  <textarea
-                    value={step}
-                    onChange={(e) => setStepsLocal(prev => prev.map((s, idx) => idx === i ? e.target.value : s))}
-                    rows={3}
-                    className="field-input field-textarea flex-1 text-sm"
-                    placeholder={`Step ${i + 1} AI instruction...`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setStepsLocal(prev => prev.filter((_, idx) => idx !== i))}
-                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors mt-1"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => setStepsLocal(prev => [...prev, ""])}
-                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 font-medium px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors"
-              >
-                <Plus size={16} /> Add Step
-              </button>
-            </div>
-            <div className="px-6 py-4 border-t border-gray-100 flex gap-3 shrink-0">
-              <button
-                type="button"
-                onClick={() => void saveSteps()}
-                disabled={savingSteps}
-                className="flex-1 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors"
-              >
-                {savingSteps ? "Saving..." : "Save Steps"}
-              </button>
-              <button type="button" onClick={() => setShowStepsModal(false)} className="px-5 py-2.5 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50">
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ─── Add Steps Modal (REMOVED) ────────────────────────── */}
 
       {/* ─── Import from List Modal ───────────────────────────── */}
       {showImportModal && (
@@ -724,13 +720,6 @@ export default function CampaignDetailPage() {
           <div className="flex items-center gap-2 flex-wrap">
             <button
               type="button"
-              onClick={() => { setStepsLocal(campaign.steps || []); setShowStepsModal(true); }}
-              className="flex items-center gap-2 px-3 py-2 border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-lg text-sm font-medium transition-colors"
-            >
-              <Plus size={15} /> Add Steps
-            </button>
-            <button
-              type="button"
               onClick={() => void startRun()}
               disabled={startingRun || runActive}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
@@ -781,7 +770,7 @@ export default function CampaignDetailPage() {
                 Run paused at company {campaign.lastRun.processedLeads} of {campaign.lastRun.totalLeads}
               </p>
               <p className="text-xs text-amber-700 mt-0.5">
-                Click "Resume Run" at the top to automatically continue from the next company.
+                Click &quot;Resume Run&quot; at the top to automatically continue from the next company.
               </p>
             </div>
           </div>
@@ -805,15 +794,19 @@ export default function CampaignDetailPage() {
 
       {/* ─── Tabs ─────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: "4px", padding: "0 4px" }}>
-        {(["contacts", "activity", "settings"] as Tab[]).map((tab) => {
+        {(["contacts", "activity", "results", "editor", "settings"] as Tab[]).map((tab) => {
           const icons: Record<Tab, React.ReactNode> = {
             contacts: <Users size={15} />,
             activity: <Activity size={15} />,
+            results: <Database size={15} />,
+            editor: <Terminal size={15} />,
             settings: <Settings size={15} />,
           };
           const labels: Record<Tab, string> = {
             contacts: "Contacts",
             activity: "Activity",
+            results: "Results",
+            editor: "Editor",
             settings: "Settings",
           };
           return (
@@ -852,7 +845,7 @@ export default function CampaignDetailPage() {
               )}
               <button
                 type="button"
-                onClick={() => { setAvailableLists(loadLists()); setShowImportModal(true); }}
+                onClick={() => { void refreshLists(); setShowImportModal(true); }}
                 className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
                 title="Add contacts from lists"
               >
@@ -880,7 +873,7 @@ export default function CampaignDetailPage() {
               <p>Import contacts from your Contact Lists to get started.</p>
               <button
                 type="button"
-                onClick={() => { setAvailableLists(loadLists()); setShowImportModal(true); }}
+                onClick={() => { void refreshLists(); setShowImportModal(true); }}
                 className="mt-3 flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 mx-auto transition-colors"
               >
                 <Database size={14} /> Import from Lists
@@ -948,6 +941,144 @@ export default function CampaignDetailPage() {
 
       {/* ─── ACTIVITY TAB ─────────────────────────────────────── */}
       {activeTab === "activity" && (
+        <section className="panel" style={{ borderTopLeftRadius: 0 }}>
+
+
+          {/* Stats row */}
+          <div className="flex items-center gap-4 flex-wrap mb-4">
+            {(["all", "success", "fail", "warning", "pending"] as FilterMode[]).map((mode) => {
+              const count = mode === "all" ? stats.total : stats[mode as keyof typeof stats] as number;
+              const colors: Record<string, string> = { all: "bg-gray-100 text-gray-700", success: "bg-green-100 text-green-700", fail: "bg-red-100 text-red-700", warning: "bg-amber-100 text-amber-700", pending: "bg-gray-100 text-gray-500" };
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setFilterMode(mode)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all border-2 ${colors[mode]} ${filterMode === mode ? "border-current opacity-100" : "border-transparent opacity-70 hover:opacity-100"}`}
+                >
+                  {mode.charAt(0).toUpperCase() + mode.slice(1)}: <strong>{count}</strong>
+                </button>
+              );
+            })}
+            <div className="ml-auto flex items-center gap-2">
+              {runSnapshot && (
+                <button type="button" onClick={exportResultsToCsv} className="button-secondary flex items-center gap-1.5 text-xs">
+                  <DownloadIcon size={13} /> Export CSV
+                </button>
+              )}
+              {runSnapshot && (
+                <button
+                  type="button"
+                  className="button-secondary text-xs"
+                  onClick={() => {
+                    try { localStorage.removeItem(`run-snapshot-${campaignId}`); } catch { /* ignore */ }
+                    setRunSnapshot(null);
+                  }}
+                >
+                  Clear Results
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Search */}
+          <div className="relative mb-4">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={searchActivity}
+              onChange={(e) => setSearchActivity(e.target.value)}
+              className="field-input pl-8"
+              placeholder="Search company or URL..."
+            />
+          </div>
+
+          {!runSnapshot && (
+            <div className="empty-state">
+              <Activity size={48} strokeWidth={1} />
+              <h3>No run results yet</h3>
+              <p>Start a campaign run from the header above to see activity here.</p>
+            </div>
+          )}
+
+          {runSnapshot && (
+            <div className="table-wrap">
+              <table className="clean-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Company</th>
+                    <th>Contact URL</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activityRows.length === 0 ? (
+                    <tr><td colSpan={4} className="table-empty">No results match current filter.</td></tr>
+                  ) : (
+                    activityRows.map((contact) => {
+                      const result = getContactResult(contact);
+                      return (
+                        <tr key={contact.id} className={result?.status === "success" ? "bg-green-50/30" : result?.status === "fail" ? "bg-red-50/30" : ""}>
+                          <td><StatusIcon status={result?.status ?? null} /></td>
+                          <td className="font-medium text-gray-800">
+                            {contact.companyName}
+                          </td>
+                          <td>
+                            <a href={contact.contactUrl} target="_blank" rel="noreferrer" className="table-link flex items-center gap-1">
+                              <span className="truncate max-w-[160px] inline-block">{contact.contactUrl}</span>
+                              <ExternalLink size={11} />
+                            </a>
+                          </td>
+                          <td>
+                            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                              result?.status === "success" ? "bg-green-100 text-green-700" :
+                              result?.status === "fail" ? "bg-red-100 text-red-700" :
+                              result?.status === "warning" ? "bg-amber-100 text-amber-700" :
+                              "bg-gray-100 text-gray-500"
+                            }`}>
+                              {result?.status === "success" ? "Site successfully submit" : result?.status === "fail" ? "Fail" : result?.status ?? "Pending"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Recent Runs */}
+          {runs.length > 0 && (
+            <div style={{ marginTop: "24px" }}>
+              <h4 className="font-semibold text-gray-700 text-sm mb-3">Past Runs</h4>
+              <div className="table-wrap">
+                <table className="clean-table">
+                  <thead>
+                    <tr><th>Run ID</th><th>Status</th><th>Total</th><th>Processed</th><th>Duplicates Skipped</th><th>Started</th><th>Finished</th></tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((run) => (
+                      <tr key={run.runId}>
+                        <td className="font-mono text-xs">{run.runId}</td>
+                        <td><span className={`status-chip ${statusTone(run.status)}`}>{run.status}</span></td>
+                        <td>{run.totalLeads}</td>
+                        <td>{run.processedLeads}</td>
+                        <td>{run.duplicatesSkipped}</td>
+                        <td className="text-xs text-gray-500">{formatDateTime(run.startedAt)}</td>
+                        <td className="text-xs text-gray-500">{run.finishedAt ? formatDateTime(run.finishedAt) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ─── RESULTS TAB ──────────────────────────────────────── */}
+      {activeTab === "results" && (
         <section className="panel" style={{ borderTopLeftRadius: 0 }}>
           {/* ─── Logs Panel ──────────────────────────────────────── */}
           <div style={{ marginBottom: "20px" }}>
@@ -1024,59 +1155,11 @@ export default function CampaignDetailPage() {
             )}
           </div>
 
-          {/* Stats row */}
-          <div className="flex items-center gap-4 flex-wrap mb-4">
-            {(["all", "success", "fail", "warning", "pending"] as FilterMode[]).map((mode) => {
-              const count = mode === "all" ? stats.total : stats[mode as keyof typeof stats] as number;
-              const colors: Record<string, string> = { all: "bg-gray-100 text-gray-700", success: "bg-green-100 text-green-700", fail: "bg-red-100 text-red-700", warning: "bg-amber-100 text-amber-700", pending: "bg-gray-100 text-gray-500" };
-              return (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setFilterMode(mode)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all border-2 ${colors[mode]} ${filterMode === mode ? "border-current opacity-100" : "border-transparent opacity-70 hover:opacity-100"}`}
-                >
-                  {mode.charAt(0).toUpperCase() + mode.slice(1)}: <strong>{count}</strong>
-                </button>
-              );
-            })}
-            <div className="ml-auto flex items-center gap-2">
-              {runSnapshot && (
-                <button type="button" onClick={exportResultsToCsv} className="button-secondary flex items-center gap-1.5 text-xs">
-                  <DownloadIcon size={13} /> Export CSV
-                </button>
-              )}
-              {runSnapshot && (
-                <button
-                  type="button"
-                  className="button-secondary text-xs"
-                  onClick={() => {
-                    try { localStorage.removeItem(`run-snapshot-${campaignId}`); } catch { /* ignore */ }
-                    setRunSnapshot(null);
-                  }}
-                >
-                  Clear Results
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Search */}
-          <div className="relative mb-4">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              value={searchActivity}
-              onChange={(e) => setSearchActivity(e.target.value)}
-              className="field-input pl-8"
-              placeholder="Search company or URL..."
-            />
-          </div>
-
           {!runSnapshot && (
             <div className="empty-state">
-              <Activity size={48} strokeWidth={1} />
-              <h3>No run results yet</h3>
-              <p>Start a campaign run from the header above to see activity here.</p>
+              <Database size={48} strokeWidth={1} />
+              <h3>No detailed results</h3>
+              <p>Start a campaign run to see comprehensive logs and failure reasons.</p>
             </div>
           )}
 
@@ -1093,13 +1176,12 @@ export default function CampaignDetailPage() {
                     <th>Captcha Solved</th>
                     <th>Site Key Not Found</th>
                     <th>Form Found</th>
-                    <th>Interested</th>
                     <th>Details</th>
                   </tr>
                 </thead>
                 <tbody>
                   {activityRows.length === 0 ? (
-                    <tr><td colSpan={10} className="table-empty">No results match current filter.</td></tr>
+                    <tr><td colSpan={9} className="table-empty">No results match current filter.</td></tr>
                   ) : (
                     activityRows.map((contact) => {
                       const result = getContactResult(contact);
@@ -1140,18 +1222,6 @@ export default function CampaignDetailPage() {
                           <td className="text-center">{result ? (captcha.solved ? "✅" : "❌") : "—"}</td>
                           <td className="text-center">{result ? (captcha.siteKeyNotFound ? "⚠️" : "—") : "—"}</td>
                           <td className="text-center">{result ? (formFound ? "✅" : "❌") : "—"}</td>
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => void toggleInterested(contact)}
-                              disabled={togglingContactId === contact.id}
-                              className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
-                                contact.isInterested ? "border-pink-500 bg-pink-50 text-pink-600" : "border-gray-300 hover:border-pink-400"
-                              }`}
-                            >
-                              {contact.isInterested && <Heart size={10} fill="currentColor" />}
-                            </button>
-                          </td>
                           <td className="text-xs text-gray-400 max-w-[180px] truncate" title={result?.confirmationMsg}>
                             <button
                               type="button"
@@ -1169,33 +1239,153 @@ export default function CampaignDetailPage() {
               </table>
             </div>
           )}
+        </section>
+      )}
 
-          {/* Recent Runs */}
-          {runs.length > 0 && (
-            <div style={{ marginTop: "24px" }}>
-              <h4 className="font-semibold text-gray-700 text-sm mb-3">Past Runs</h4>
-              <div className="table-wrap">
-                <table className="clean-table">
-                  <thead>
-                    <tr><th>Run ID</th><th>Status</th><th>Total</th><th>Processed</th><th>Duplicates Skipped</th><th>Started</th><th>Finished</th></tr>
-                  </thead>
-                  <tbody>
-                    {runs.map((run) => (
-                      <tr key={run.runId}>
-                        <td className="font-mono text-xs">{run.runId}</td>
-                        <td><span className={`status-chip ${statusTone(run.status)}`}>{run.status}</span></td>
-                        <td>{run.totalLeads}</td>
-                        <td>{run.processedLeads}</td>
-                        <td>{run.duplicatesSkipped}</td>
-                        <td className="text-xs text-gray-500">{formatDateTime(run.startedAt)}</td>
-                        <td className="text-xs text-gray-500">{run.finishedAt ? formatDateTime(run.finishedAt) : "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+      {/* ─── EDITOR TAB ───────────────────────────────────────── */}
+      {activeTab === "editor" && (
+        <section className="panel" style={{ borderTopLeftRadius: 0 }}>
+          <div className="flex justify-between items-center mb-4">
+            <div>
+              <h3 className="font-semibold text-gray-800">Campaign Editor</h3>
+              <p className="text-sm text-gray-500">Configure AI steps and submission schedules.</p>
             </div>
-          )}
+            <button
+              type="button"
+              onClick={() => {
+                setStepsLocal(prev => [...prev, { id: Date.now().toString(), aiInstruction: "", daySequence: 1, timeOfDay: "09:00", type: "immediate", enabled: true }]);
+                setExpandedStepIndex(stepsLocal.length);
+              }}
+              className="flex items-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <Plus size={15} /> Add Step
+            </button>
+          </div>
+
+          {message && <p className="text-sm mb-3 px-3 py-2 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg">{message}</p>}
+
+          <div className="space-y-2">
+            {stepsLocal.length === 0 ? (
+              <div className="p-8 text-center border-2 border-dashed border-gray-200 rounded-xl bg-gray-50">
+                <Terminal size={32} className="mx-auto text-gray-400 mb-2" />
+                <p className="text-gray-600 font-medium text-sm">No follow-up steps configured.</p>
+                <p className="text-gray-400 text-xs mt-1">Click &quot;+ Add Step&quot; to configure automated follow-up messages.</p>
+              </div>
+            ) : (
+              stepsLocal.map((step, i) => {
+                const isExpanded = expandedStepIndex === i;
+                const label = (typeof step === "string" ? step : step.aiInstruction || "").trim();
+                const typeLabel = step.type === "normal" ? `Scheduled (Day +${step.daySequence || 1}, ${step.timeOfDay || "09:00"})` : "Immediate Send";
+                return (
+                  <div key={step.id || i} className={`border ${step.enabled !== false ? "border-gray-200 bg-white" : "border-gray-100 bg-gray-50 opacity-70"} rounded-xl shadow-sm transition-all overflow-hidden`}>
+                    {/* ── Collapsed row header ── */}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedStepIndex(isExpanded ? null : i)}
+                      className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50/50 transition-colors text-left"
+                    >
+                      <div className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center shrink-0">
+                        {i + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{label || <span className="italic text-gray-400">No instruction yet</span>}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">{typeLabel}</p>
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${step.enabled !== false ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-500"}`}>
+                        {step.enabled !== false ? "ON" : "OFF"}
+                      </span>
+                      <ChevronLeft size={16} className={`text-gray-400 transition-transform ${isExpanded ? "-rotate-90" : ""}`} />
+                    </button>
+
+                    {/* ── Expanded detail panel ── */}
+                    {isExpanded && (
+                      <div className="px-4 pb-4 pt-2 border-t border-gray-100 space-y-4">
+                        <div className="flex flex-wrap gap-4 items-start">
+                          <label className="flex-1 min-w-[120px]">
+                            <span className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wider">Type</span>
+                            <select
+                              value={step.type || "immediate"}
+                              onChange={e => setStepsLocal(prev => prev.map((s, idx) => idx === i ? { ...s, type: e.target.value } : s))}
+                              className="field-input text-sm py-1.5"
+                            >
+                              <option value="immediate">Immediate Send</option>
+                              <option value="normal">Scheduled Send</option>
+                            </select>
+                          </label>
+                          
+                          {step.type === "normal" && (
+                            <>
+                              <label className="w-24">
+                                <span className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wider">Day +</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={step.daySequence || 1}
+                                  onChange={e => setStepsLocal(prev => prev.map((s, idx) => idx === i ? { ...s, daySequence: Number(e.target.value) } : s))}
+                                  className="field-input text-sm py-1.5"
+                                />
+                              </label>
+                              <label className="w-32">
+                                <span className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wider">Time</span>
+                                <div className="relative">
+                                  <Clock size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                                  <input
+                                    type="time"
+                                    value={step.timeOfDay || "09:00"}
+                                    onChange={e => setStepsLocal(prev => prev.map((s, idx) => idx === i ? { ...s, timeOfDay: e.target.value } : s))}
+                                    className="field-input text-sm py-1.5 pl-8"
+                                  />
+                                </div>
+                              </label>
+                            </>
+                          )}
+                        </div>
+
+                        <div>
+                          <span className="block text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wider">AI Instruction</span>
+                          <textarea
+                            value={step.aiInstruction || (typeof step === "string" ? step : "")}
+                            onChange={e => setStepsLocal(prev => prev.map((s, idx) => idx === i ? { ...s, aiInstruction: e.target.value } : s))}
+                            rows={4}
+                            className="field-input field-textarea text-sm w-full"
+                            placeholder="What should the AI do in this step?"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                          <button
+                            type="button"
+                            onClick={() => setStepsLocal(prev => prev.map((s, idx) => idx === i ? { ...s, enabled: s.enabled === false ? true : false } : s))}
+                            className={`text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${step.enabled !== false ? "bg-green-100 text-green-700 hover:bg-green-200" : "bg-gray-200 text-gray-600 hover:bg-gray-300"}`}
+                          >
+                            {step.enabled !== false ? "Enabled" : "Disabled"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setStepsLocal(prev => prev.filter((_, idx) => idx !== i)); setExpandedStepIndex(null); }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors"
+                          >
+                            <Trash2 size={14} /> Remove Step
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+            
+            <div className="pt-4 border-t border-gray-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => void saveSteps()}
+                disabled={savingSteps}
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {savingSteps ? "Saving..." : "Save Steps"}
+              </button>
+            </div>
+          </div>
         </section>
       )}
 
@@ -1245,40 +1435,49 @@ export default function CampaignDetailPage() {
                 <option value="search">Search entire domain — outreach will look for contact page</option>
               </select>
             </label>
-            <label className="field-block full">
-              <span className="font-medium text-gray-700 text-sm">AI Instruction (Step 1 / Main)</span>
-              <textarea
-                value={editAiInstruction}
-                onChange={(e) => setEditAiInstruction(e.target.value)}
-                rows={8}
-                className="field-input field-textarea field-textarea-lg"
-                placeholder="Describe what the AI should write when filling out contact forms..."
-              />
+
+            <label className="field-block">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="breakFlag"
+                  checked={editBreakFlag}
+                  onChange={(e) => setEditBreakFlag(e.target.checked)}
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="font-medium text-gray-700 text-sm">Break/Stop on Failure</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-1 ml-6">If enabled, the outreach run will immediately stop if a submission step fails or requires manual intervention.</p>
             </label>
 
-            {/* Steps preview */}
-            {stepsLocal.filter(s => s.trim()).length > 0 && (
-              <div className="full">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-gray-700">Follow-up Steps ({stepsLocal.filter(s => s.trim()).length})</p>
-                  <button
-                    type="button"
-                    onClick={() => { setStepsLocal(campaign.steps || []); setShowStepsModal(true); }}
-                    className="text-xs text-blue-600 hover:text-blue-800"
-                  >
-                    Edit Steps
-                  </button>
-                </div>
-                <div className="space-y-2">
-                  {stepsLocal.filter(s => s.trim()).map((step, i) => (
-                    <div key={i} className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 flex gap-2">
-                      <span className="shrink-0 w-5 h-5 rounded-full bg-purple-100 text-purple-700 text-xs font-bold flex items-center justify-center">{i + 2}</span>
-                      <span className="truncate">{step}</span>
-                    </div>
-                  ))}
-                </div>
+            {/* Scheduling fields */}
+            <label className="field-block">
+              <span className="font-medium text-gray-700 text-sm">Schedule Outreach Run</span>
+              <div className="flex gap-2 items-center mt-1">
+                <span className="text-xs text-gray-500">Day of Week:</span>
+                <select
+                  value={campaign?.scheduleDay || "monday"}
+                  onChange={e => setCampaign(c => c ? { ...c, scheduleDay: e.target.value } : c)}
+                  className="field-input text-sm py-1.5 w-32"
+                >
+                  <option value="monday">Monday</option>
+                  <option value="tuesday">Tuesday</option>
+                  <option value="wednesday">Wednesday</option>
+                  <option value="thursday">Thursday</option>
+                  <option value="friday">Friday</option>
+                  <option value="saturday">Saturday</option>
+                  <option value="sunday">Sunday</option>
+                </select>
+                <span className="text-xs text-gray-500 ml-4">Time:</span>
+                <input
+                  type="time"
+                  value={campaign?.scheduleTime || "09:00"}
+                  onChange={e => setCampaign(c => c ? { ...c, scheduleTime: e.target.value } : c)}
+                  className="field-input text-sm py-1.5 w-28"
+                />
               </div>
-            )}
+              <p className="text-xs text-gray-400 mt-1">Outreach will automatically run at the scheduled day and time.</p>
+            </label>
 
             <div className="full">
               <button

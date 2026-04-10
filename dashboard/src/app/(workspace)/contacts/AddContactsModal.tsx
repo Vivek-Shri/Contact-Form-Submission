@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import Papa from "papaparse";
 import {
   UploadCloud,
@@ -77,21 +78,7 @@ function dedupeByDomain(rows: ParsedRow[]): {
   };
 }
 
-const LS_KEY = "outreach-contact-lists";
-function loadLists(): ContactList[] {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? (JSON.parse(raw) as ContactList[]) : [];
-  } catch {
-    return [];
-  }
-}
-function saveLists(lists: ContactList[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(lists));
-}
-function generateId() {
-  return `list-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+// We now use PostgreSQL backend APIs for saving/loading lists.
 
 /* ─── Component ────────────────────────────────────────────────── */
 
@@ -100,6 +87,9 @@ export function AddContactsModal({
   onClose,
   onComplete,
 }: AddContactsModalProps) {
+  const { data: session } = useSession();
+  const userId = (session?.user as any)?.id || "";
+
   // Steps: 1 = upload CSV, 2 = review filtered + multi-select, 3 = save options, 4 = done
   const [step, setStep] = useState<number>(1);
   const [error, setError] = useState("");
@@ -141,7 +131,12 @@ export function AddContactsModal({
 
   useEffect(() => {
     if (isOpen) {
-      setLists(loadLists());
+      if (userId) {
+        fetch("/api/contact-lists")
+          .then((r) => r.ok ? r.json() : Promise.reject())
+          .then((d) => setLists(d.lists || []))
+          .catch(() => setLists([]));
+      }
       void loadCampaigns();
     } else {
       setStep(1);
@@ -373,29 +368,24 @@ export function AddContactsModal({
       setIsSavingToDb(false);
     }
 
-    if (saveMode === "existing" && selectedListId) {
-      const updated = lists.map((l) => {
-        if (l.id === selectedListId) {
-          const existingUrls = new Set(l.contacts.map((c) => c.contactUrl));
-          const newItems = items.filter((i) => !existingUrls.has(i.contactUrl));
-          return { ...l, contacts: [...l.contacts, ...newItems] };
-        }
-        return l;
-      });
-      setLists(updated);
-      saveLists(updated);
-    } else if (saveMode === "new" && newListName.trim()) {
-      const newList: ContactList = {
-        id: generateId(),
-        name: newListName.trim(),
-        contacts: items,
-        createdAt: new Date().toISOString(),
-      };
-      const updated = [newList, ...lists];
-      setLists(updated);
-      saveLists(updated);
-    } else {
-      setError("Please choose a valid list.");
+    try {
+      if (saveMode === "existing" && selectedListId) {
+        // Not currently implemented in the proxy, treating as error for now or fallback to new list mode via ui
+        setError("Appending to existing lists is currently disabled via API. Create a new list.");
+        return;
+      } else if (saveMode === "new" && newListName.trim()) {
+        const res = await fetch("/api/contact-lists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: newListName.trim(), contacts: items })
+        });
+        if (!res.ok) throw new Error("Failed to save list to backend");
+      } else {
+        setError("Please choose a valid list.");
+        return;
+      }
+    } catch(err) {
+      setError(err instanceof Error ? err.message : "Failed to save contacts");
       return;
     }
 

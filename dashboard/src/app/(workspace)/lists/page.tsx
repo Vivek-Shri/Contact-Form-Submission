@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useSession } from "next-auth/react";
 import Papa from "papaparse";
 import {
   UploadCloud,
@@ -38,28 +39,13 @@ interface CampaignOption {
 
 /* ─── Helpers ───────────────────────────────────────────────────── */
 
-const LS_KEY = "outreach-contact-lists";
-
-function loadLists(): ContactList[] {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? (JSON.parse(raw) as ContactList[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveLists(lists: ContactList[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(lists));
-}
-
-function generateId() {
-  return `list-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 /* ─── Component ────────────────────────────────────────────────── */
 
 export default function ListsPage() {
+  const { data: session } = useSession();
+  const userId = (session?.user as any)?.id || "";
+
   const [lists, setLists] = useState<ContactList[]>([]);
   const [expandedListId, setExpandedListId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -86,9 +72,38 @@ export default function ListsPage() {
   const [sendingDone, setSendingDone] = useState(false);
   const [sendingActive, setSendingActive] = useState(false);
 
+  const [isFetchingLists, setIsFetchingLists] = useState(true);
+  const [mounted, setMounted] = useState(false);
+
+  // Sync state on mount
   useEffect(() => {
-    setLists(loadLists());
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMounted(true);
+    if (!userId) return;
+
+    const fetchLists = async () => {
+      setIsFetchingLists(true);
+      try {
+        const res = await fetch("/api/contact-lists", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          // Map backend response structure to the frontend structure
+          setLists(data.lists?.map((l: any) => ({
+            id: l.id,
+            name: l.name,
+            createdAt: l.createdAt || new Date().toISOString(),
+            contacts: [], // Summary response doesn't return full contacts, handled on expand
+            contactCount: l.contactCount || 0
+          })) || []);
+        }
+      } catch (err) {
+        console.error("Failed to load lists:", err);
+      } finally {
+        setIsFetchingLists(false);
+      }
+    };
+    void fetchLists();
+  }, [userId]);
 
   const filteredLists = lists.filter(
     (l) =>
@@ -256,26 +271,63 @@ export default function ListsPage() {
     });
   };
 
-  const saveList = () => {
-    const newList: ContactList = {
-      id: generateId(),
-      name: newListName.trim(),
-      contacts: parsedLeads,
-      createdAt: new Date().toISOString(),
-    };
-    const updated = [newList, ...lists];
-    setLists(updated);
-    saveLists(updated);
-    resetCreateFlow();
+  const [isSavingList, setIsSavingList] = useState(false);
+
+  const saveList = async () => {
+    if (!userId || !newListName.trim()) return;
+    setIsSavingList(true);
+    setError("");
+
+    try {
+      const res = await fetch("/api/contact-lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: newListName.trim(),
+          contacts: parsedLeads
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to create list");
+      }
+
+      const created = await res.json();
+      
+      const newList: ContactList = {
+        id: created.id,
+        name: created.name,
+        contacts: parsedLeads,
+        createdAt: created.createdAt,
+      };
+
+      setLists([newList, ...lists]);
+      resetCreateFlow();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create list");
+    } finally {
+      setIsSavingList(false);
+    }
   };
 
-  const deleteList = (listId: string) => {
+  const deleteList = async (listId: string) => {
     const confirmed = globalThis.confirm("Delete this list and all its contacts?");
     if (!confirmed) return;
-    const updated = lists.filter((l) => l.id !== listId);
-    setLists(updated);
-    saveLists(updated);
-    if (expandedListId === listId) setExpandedListId(null);
+    
+    try {
+      const res = await fetch(`/api/contact-lists/${listId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setLists(lists.filter((l) => l.id !== listId));
+        if (expandedListId === listId) setExpandedListId(null);
+      } else {
+        alert("Failed to delete list");
+      }
+    } catch (err) {
+      alert("Failed to delete list due to an error.");
+    }
   };
 
   const downloadTemplate = (e: React.MouseEvent) => {
@@ -314,18 +366,29 @@ export default function ListsPage() {
     }
   };
 
-  const toggleExpand = (listId: string) => {
-    setExpandedListId((prev) => {
-      const next = prev === listId ? null : listId;
-      if (next) {
-        const list = lists.find(l => l.id === next);
-        if (list) checkUrls(list.contacts.map(c => c.contactUrl));
+  const toggleExpand = async (listId: string) => {
+    // If opening a new list, and it doesn't have contacts yet, fetch them
+    if (expandedListId !== listId) {
+      const list = lists.find(l => l.id === listId);
+      if (list && (!list.contacts || list.contacts.length === 0)) {
+        try {
+          const res = await fetch(`/api/contact-lists/${listId}`, { cache: "no-store" });
+          if (res.ok) {
+            const data = await res.json();
+            setLists(prev => prev.map(l => l.id === listId ? { ...l, contacts: data.contacts || [] } : l));
+            checkUrls(data.contacts?.map((c: any) => c.contactUrl) || []);
+          }
+        } catch (err) {
+          console.error("Failed to load list details:", err);
+        }
+      } else if (list) {
+        checkUrls(list.contacts.map(c => c.contactUrl));
       }
-      return next;
-    });
+    }
+    setExpandedListId((prev) => (prev === listId ? null : listId));
   };
 
-  /* ─── Render ──────────────────────────────────────────────────── */
+  if (!mounted) return null;
 
   return (
     <div className="page-stack">
@@ -433,8 +496,10 @@ export default function ListsPage() {
           />
         </div>
 
-        {/* Lists grid */}
-        {filteredLists.length === 0 ? (
+        {/* Lists Container */}
+        {isFetchingLists ? (
+          <div className="text-center p-8 text-zinc-500">Loading lists...</div>
+        ) : filteredLists.length === 0 ? (
           <div className="empty-state">
             <Database size={48} strokeWidth={1} />
             <h3>No lists yet</h3>
@@ -446,7 +511,24 @@ export default function ListsPage() {
               <div key={list.id} className="list-card">
                 <div
                   className="list-card-header"
-                  onClick={() => toggleExpand(list.id)}
+                  onClick={async () => {
+                    if (expandedListId !== list.id) {
+                      try {
+                        const res = await fetch(`/api/contact-lists/${list.id}`);
+                        if (res.ok) {
+                          const data = await res.json();
+                          setLists((prev) =>
+                            prev.map((l) =>
+                              l.id === list.id ? { ...l, contacts: data.contacts || [] } : l
+                            )
+                          );
+                        }
+                      } catch (err) {
+                        console.error("Failed to fetch list contacts");
+                      }
+                    }
+                    toggleExpand(list.id);
+                  }}
                 >
                   <div className="list-card-info">
                     <div className="list-card-chevron">
@@ -459,7 +541,7 @@ export default function ListsPage() {
                     <div>
                       <h3 className="list-card-name">{list.name}</h3>
                       <p className="list-card-meta">
-                        <Building2 size={13} /> {list.contacts.length} companies
+                        <Building2 size={13} /> {(list as any).contactCount ?? list.contacts.length} companies
                         &nbsp;·&nbsp;
                         {new Date(list.createdAt).toLocaleDateString()}
                       </p>

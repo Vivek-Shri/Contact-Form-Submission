@@ -1,11 +1,17 @@
-import { NextResponse } from "next/server";
-
 import { backendJson, extractError } from "@/lib/backend-proxy";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const campaignId = url.searchParams.get("campaignId")?.trim();
   const q = url.searchParams.get("q")?.trim();
@@ -28,9 +34,11 @@ export async function GET(request: Request) {
   const query = params.toString();
 
   try {
-    const result = await backendJson(`/api/contacts${query ? `?${query}` : ""}`, {
-      method: "GET",
-    });
+    const result = await backendJson(
+      `/api/contacts${query ? `?${query}` : ""}`,
+      { method: "GET" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
     if (!result.ok) {
       return NextResponse.json(
         { error: extractError(result.payload, "Unable to load contacts.") },
@@ -46,10 +54,17 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
-    const result = await backendJson(`/api/contacts`, {
-      method: "DELETE",
-    });
+    const result = await backendJson(
+      `/api/contacts`,
+      { method: "DELETE" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
 
     if (!result.ok) {
       return NextResponse.json(

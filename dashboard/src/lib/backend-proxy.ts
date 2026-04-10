@@ -21,19 +21,32 @@ export async function parseJsonSafe(response: Response): Promise<unknown | null>
   }
 }
 
-export async function backendJson(path: string, init: RequestInit = {}): Promise<BackendProxyResult> {
+export async function backendJson(
+  path: string,
+  init: RequestInit = {},
+  options?: { userId?: string; isAdmin?: boolean }
+): Promise<BackendProxyResult> {
   const backendBaseUrl = resolveBackendBaseUrl();
+
+  const headers = { ...(init.headers || {}) } as Record<string, string>;
+
+  if (options?.userId) {
+    headers["X-User-Id"] = options.userId;
+  }
+  if (options?.isAdmin) {
+    headers["X-Is-Admin"] = "true";
+  }
 
   // If body is a plain object, automatically stringify and add the Content-Type header
   if (init.body && typeof init.body === "object" && !(init.body instanceof FormData) && !(init.body instanceof URLSearchParams) && !(init.body instanceof Blob)) {
-    init.headers = {
-      ...init.headers,
-      "Content-Type": "application/json",
-    };
-    init.body = JSON.stringify(init.body) as any;
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(init.body);
   }
 
-  const response = await fetch(`${backendBaseUrl}${path}`, withNoStore(init));
+  const response = await fetch(`${backendBaseUrl}${path}`, withNoStore({
+    ...init,
+    headers
+  }));
   const payload = await parseJsonSafe(response);
 
   return {

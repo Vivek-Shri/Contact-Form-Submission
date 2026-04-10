@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, Trash2, X, FolderKanban } from "lucide-react";
+import { Plus, Trash2, X, FolderKanban, Settings } from "lucide-react";
 
 import type { CampaignRecord, PaginationMeta } from "@/lib/models";
 import { formatDateTime, statusTone } from "@/lib/ui";
@@ -273,6 +273,13 @@ export default function CampaignsPage() {
                           className="text-xs font-medium px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition"
                         >
                           Open
+                        </Link>
+                        <Link
+                          href={`/campaigns/${campaign.id}?tab=settings`}
+                          className="text-xs font-medium px-3 py-1.5 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 transition flex items-center gap-1"
+                        >
+                          <Settings size={13} />
+                          Edit
                         </Link>
                         <button
                           type="button"

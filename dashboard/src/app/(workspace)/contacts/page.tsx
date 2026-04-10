@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useSession } from "next-auth/react";
 import Papa from "papaparse";
 import {
   Plus,
@@ -37,13 +38,7 @@ interface ListContact { companyName: string; contactUrl: string; }
 interface ContactList { id: string; name: string; contacts: ListContact[]; createdAt: string; }
 interface CampaignOption { id: string; name: string; }
 
-const LS_KEY = "outreach-contact-lists";
-function loadLists(): ContactList[] {
-  try { const raw = localStorage.getItem(LS_KEY); return raw ? (JSON.parse(raw) as ContactList[]) : []; }
-  catch { return []; }
-}
-function saveLists(lists: ContactList[]) { localStorage.setItem(LS_KEY, JSON.stringify(lists)); }
-function generateId() { return `list-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+// Lists are now managed via DB
 
 /* ─── Contacts API Types ────────────────────────────────────────── */
 interface ContactListResponse { contacts: ContactRecord[]; pagination?: PaginationMeta; }
@@ -52,6 +47,9 @@ const PAGE_SIZE = 50;
 type PageTab = "contacts" | "lists";
 
 export default function ContactsPage() {
+  const { data: session } = useSession();
+  const userId = (session?.user as any)?.id || "";
+
   const [activeTab, setActiveTab] = useState<PageTab>("contacts");
 
   /* ══════════════════════════════════════════════════════════════
@@ -103,7 +101,22 @@ export default function ContactsPage() {
   /* ──────────────────────────────────────────────────────────────
      Load
   ────────────────────────────────────────────────────────────── */
-  useEffect(() => { setLists(loadLists()); }, []);
+  const loadLists = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch("/api/contact-lists", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        setLists(data.lists || []);
+      }
+    } catch (err) {
+      console.error("Failed to load lists", err);
+    }
+  }, [userId]);
+
+  useEffect(() => { 
+    void loadLists();
+  }, [loadLists]);
 
   const totalPages = useMemo(() => {
     const candidate = pagination.totalPages ?? pagination.total_pages ?? 1;
@@ -222,45 +235,61 @@ export default function ContactsPage() {
   /* ──────────────────────────────────────────────────────────────
      Save Contact to List
   ────────────────────────────────────────────────────────────── */
-  const openSaveToList = (contactTargets: ContactRecord[]) => {
+  const openSaveToList = async (contactTargets: ContactRecord[]) => {
     if (contactTargets.length === 0) return;
-    const freshLists = loadLists();
-    setLists(freshLists);
+    
+    let fetchLists: ContactList[] = [];
+    if (userId) {
+      try {
+        const res = await fetch("/api/contact-lists");
+        if (res.ok) {
+          const d = await res.json();
+          fetchLists = d.lists || [];
+        }
+      } catch (e) {
+        // failed to fetch lists
+      }
+    }
+    setLists(fetchLists);
     setSaveTargets(contactTargets);
-    setSaveMode(freshLists.length > 0 ? "existing" : "new");
-    setSelectedListId(freshLists[0]?.id ?? "");
+    setSaveMode(fetchLists.length > 0 ? "new" : "new"); // Forced "new" for now due to backend API
+    setSelectedListId("");
     setNewListNameForSave("");
     setSavedFeedback(null);
   };
 
-  const confirmSaveToList = () => {
+
+  const confirmSaveToList = async () => {
     if (!saveTargets || saveTargets.length === 0) return;
     const items: ListContact[] = saveTargets.map(t => ({ companyName: t.companyName || "Unknown", contactUrl: t.contactUrl }));
 
     let listName = "";
 
-    if (saveMode === "existing" && selectedListId) {
-      const updated = lists.map(l => {
-        if (l.id === selectedListId) {
-          // Add new items, filtering out duplicates
-          const existingUrls = new Set(l.contacts.map(c => c.contactUrl));
-          const newItems = items.filter(i => !existingUrls.has(i.contactUrl));
-          return { ...l, contacts: [...l.contacts, ...newItems] };
-        }
-        return l;
-      });
-      setLists(updated); saveLists(updated);
-      listName = lists.find(l => l.id === selectedListId)?.name ?? "list";
-    } else if (saveMode === "new" && newListNameForSave.trim()) {
-      const newList: ContactList = { id: generateId(), name: newListNameForSave.trim(), contacts: items, createdAt: new Date().toISOString() };
-      const updated = [newList, ...lists];
-      setLists(updated); saveLists(updated);
-      listName = newList.name;
-    } else return;
-
-    setSavedFeedback(`Saved ${items.length} contact${items.length !== 1 ? "s" : ""} to "${listName}"`);
-
-    setTimeout(() => { setSaveTargets(null); setSavedFeedback(null); }, 1200);
+    try {
+      if (saveMode === "existing" && selectedListId) {
+        const res = await fetch(`/api/contact-lists/${selectedListId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contacts: items })
+        });
+        if (!res.ok) throw new Error("Failed to update list");
+        listName = lists.find(l => l.id === selectedListId)?.name || "Selected List";
+      } else if (saveMode === "new" && newListNameForSave.trim()) {
+        const res = await fetch("/api/contact-lists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: newListNameForSave.trim(), contacts: items })
+        });
+        if (!res.ok) throw new Error("Failed to save list to backend");
+        listName = newListNameForSave.trim();
+        void loadLists();
+      } else return;
+  
+      setSavedFeedback(`Saved ${items.length} contact${items.length !== 1 ? "s" : ""} to "${listName}"`);
+      setTimeout(() => { setSaveTargets(null); setSavedFeedback(null); }, 1200);
+    } catch {
+      globalThis.alert("Failed to save list.");
+    }
   };
 
   /* ──────────────────────────────────────────────────────────────
@@ -317,17 +346,33 @@ export default function ContactsPage() {
     });
   };
 
-  const saveNewList = () => {
-    const newList: ContactList = { id: generateId(), name: newListName.trim(), contacts: parsedLeads, createdAt: new Date().toISOString() };
-    const updated = [newList, ...lists];
-    setLists(updated); saveLists(updated); resetCreateFlow();
+  const saveNewList = async () => {
+    if (!newListName.trim()) return;
+    setCreateError("");
+    try {
+      const res = await fetch("/api/contact-lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newListName.trim(), contacts: parsedLeads })
+      });
+      if (!res.ok) throw new Error("Failed to create list");
+      void loadLists();
+      resetCreateFlow();
+    } catch (err) {
+      setCreateError("Failed to save list to backend.");
+    }
   };
 
-  const deleteList = (listId: string) => {
+  const deleteList = async (listId: string) => {
     if (!globalThis.confirm("Delete this list?")) return;
-    const updated = lists.filter(l => l.id !== listId);
-    setLists(updated); saveLists(updated);
-    if (expandedListId === listId) setExpandedListId(null);
+    try {
+      const res = await fetch(`/api/contact-lists/${listId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete list");
+      void loadLists();
+      if (expandedListId === listId) setExpandedListId(null);
+    } catch {
+      globalThis.alert("Failed to delete list.");
+    }
   };
 
   const downloadListCsv = (list: ContactList) => {
@@ -764,7 +809,22 @@ export default function ContactsPage() {
             <div className="lists-container">
               {filteredLists.map((list) => (
                 <div key={list.id} className="list-card">
-                  <div className="list-card-header" onClick={() => setExpandedListId(p => p === list.id ? null : list.id)}>
+                  <div className="list-card-header" onClick={async () => {
+                    if (expandedListId === list.id) {
+                      setExpandedListId(null);
+                    } else {
+                      setExpandedListId(list.id);
+                      if (!list.contacts || list.contacts.length === 0) {
+                        try {
+                          const res = await fetch(`/api/contact-lists/${list.id}`);
+                          if (res.ok) {
+                            const data = await res.json();
+                            setLists(prev => prev.map(l => l.id === list.id ? { ...l, contacts: data.contacts || [] } : l));
+                          }
+                        } catch (err) { console.error("Failed to load list contacts", err); }
+                      }
+                    }
+                  }}>
                     <div className="list-card-info">
                       <div className="list-card-chevron">
                         {expandedListId === list.id ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
@@ -772,7 +832,7 @@ export default function ContactsPage() {
                       <div>
                         <h3 className="list-card-name">{list.name}</h3>
                         <p className="list-card-meta">
-                          <Building2 size={13} /> {list.contacts.length} companies &nbsp;·&nbsp;
+                          <Building2 size={13} /> {(list as any).contactCount ?? list.contacts?.length ?? 0} companies &nbsp;·&nbsp;
                           {new Date(list.createdAt).toLocaleDateString()}
                         </p>
                       </div>
@@ -794,6 +854,9 @@ export default function ContactsPage() {
 
                   {expandedListId === list.id && (
                     <div className="list-card-body">
+                      {!list.contacts || list.contacts.length === 0 ? (
+                        <p className="text-sm text-gray-400 p-4 text-center">Loading contacts…</p>
+                      ) : (
                       <div className="table-wrap">
                         <table className="clean-table">
                           <thead>
@@ -814,8 +877,10 @@ export default function ContactsPage() {
                           </tbody>
                         </table>
                       </div>
+                      )}
                     </div>
                   )}
+
                 </div>
               ))}
             </div>

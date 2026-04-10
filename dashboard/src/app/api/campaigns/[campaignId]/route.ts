@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
-
 import { backendJson, extractError } from "@/lib/backend-proxy";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,11 +11,20 @@ interface Params {
 }
 
 export async function GET(_: Request, { params }: { params: Promise<Params> }) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const resolvedParams = await params;
   const campaignId = encodeURIComponent(resolvedParams.campaignId);
 
   try {
-    const result = await backendJson(`/api/campaigns/${campaignId}`, { method: "GET" });
+    const result = await backendJson(
+      `/api/campaigns/${campaignId}`,
+      { method: "GET" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
     if (!result.ok) {
       return NextResponse.json(
         { error: extractError(result.payload, "Unable to load campaign details.") },
@@ -30,6 +40,11 @@ export async function GET(_: Request, { params }: { params: Promise<Params> }) {
 }
 
 export async function PUT(request: Request, { params }: { params: Promise<Params> }) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const resolvedParams = await params;
   const campaignId = encodeURIComponent(resolvedParams.campaignId);
   let body: unknown;
@@ -41,13 +56,15 @@ export async function PUT(request: Request, { params }: { params: Promise<Params
   }
 
   try {
-    const result = await backendJson(`/api/campaigns/${campaignId}`, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
+    const result = await backendJson(
+      `/api/campaigns/${campaignId}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
 
     if (!result.ok) {
       return NextResponse.json(
@@ -64,11 +81,20 @@ export async function PUT(request: Request, { params }: { params: Promise<Params
 }
 
 export async function DELETE(_: Request, { params }: { params: Promise<Params> }) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const resolvedParams = await params;
   const campaignId = encodeURIComponent(resolvedParams.campaignId);
 
   try {
-    const result = await backendJson(`/api/campaigns/${campaignId}`, { method: "DELETE" });
+    const result = await backendJson(
+      `/api/campaigns/${campaignId}`,
+      { method: "DELETE" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
 
     if (!result.ok) {
       return NextResponse.json(

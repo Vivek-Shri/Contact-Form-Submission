@@ -25,9 +25,13 @@ export async function POST(req: Request) {
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
+    // Auto-promote the first user to admin
+    const countRes = await pool.query('SELECT COUNT(*) FROM users');
+    const isFirstUser = parseInt(countRes.rows[0].count, 10) === 0;
+
     const insertRes = await pool.query(
-      'INSERT INTO users (email, name, hashed_password, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
-      [normalizedEmail, name || '', hashedPassword, new Date().toISOString()]
+      'INSERT INTO users (email, name, hashed_password, created_at, is_admin) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [normalizedEmail, name || '', hashedPassword, new Date().toISOString(), isFirstUser]
     );
 
     return NextResponse.json(

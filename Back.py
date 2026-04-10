@@ -17,7 +17,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Header, Body
 from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extras
@@ -51,7 +51,7 @@ SOCIAL_MEDIA_DOMAINS = {
 }
 
 
-DEFAULT_DATABASE_URL = "postgresql://postgres:6%3F9H%23%40Dv5W%2BVTEZ@db.rhmqhrjbknazyflmbwbv.supabase.co:5432/postgres"
+DEFAULT_DATABASE_URL = "postgresql://postgres.rhmqhrjbknazyflmbwbv:6%3F9H%23%40Dv5W%2BVTEZ@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres"
 
 def _resolve_database_url() -> str:
 	for key in ("DATABASE_URL", "DATABASE_STRING", "POSTGRES_URL", "SUPABASE_DB_URL"):
@@ -111,6 +111,7 @@ def _init_db() -> None:
 					max_daily_submissions INTEGER DEFAULT 100,
 					search_for_form BOOLEAN DEFAULT FALSE,
 					steps JSONB DEFAULT '[]',
+					break_flag BOOLEAN DEFAULT FALSE,
 					created_at TEXT,
 					updated_at TEXT
 				)
@@ -130,6 +131,9 @@ def _init_db() -> None:
 					url_key TEXT NOT NULL,
 					created_at TEXT,
 					updated_at TEXT,
+				UNIQUE (campaign_id, url_key)
+				)
+			""")
 			# Users table
 			cur.execute("""
 				CREATE TABLE IF NOT EXISTS users (
@@ -137,9 +141,116 @@ def _init_db() -> None:
 					email TEXT UNIQUE NOT NULL,
 					name TEXT,
 					hashed_password TEXT NOT NULL,
-					created_at TEXT
+					created_at TEXT,
+					is_admin BOOLEAN DEFAULT FALSE
 				)
 			""")
+			# Migration: add is_admin to users if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'users' AND column_name = 'is_admin'
+					) THEN
+						ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;
+					END IF;
+				END $$;
+			""")
+			# Migration: add user_id column to campaigns if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaigns' AND column_name = 'user_id'
+					) THEN
+						ALTER TABLE campaigns ADD COLUMN user_id TEXT;
+					END IF;
+				END $$;
+			""")
+			# Migration: add user_id column to outreach_runs if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'outreach_runs' AND column_name = 'user_id'
+					) THEN
+						ALTER TABLE outreach_runs ADD COLUMN user_id TEXT;
+					END IF;
+				END $$;
+			""")
+			# Migration: add user_id column to campaign_contacts if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaign_contacts' AND column_name = 'user_id'
+					) THEN
+						ALTER TABLE campaign_contacts ADD COLUMN user_id TEXT;
+					END IF;
+				END $$;
+			""")
+			# Migration: add schedule_day column to campaigns if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaigns' AND column_name = 'schedule_day'
+					) THEN
+						ALTER TABLE campaigns ADD COLUMN schedule_day TEXT;
+					END IF;
+				END $$;
+			""")
+			# Migration: add schedule_time column to campaigns if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaigns' AND column_name = 'schedule_time'
+					) THEN
+						ALTER TABLE campaigns ADD COLUMN schedule_time TEXT;
+					END IF;
+				END $$;
+			""")
+			# Contact Lists table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS contact_lists (
+					list_id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					user_id TEXT,
+					created_at TEXT,
+					updated_at TEXT
+				)
+			""")
+			# Contact List Items table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS contact_list_items (
+					id SERIAL PRIMARY KEY,
+					list_id TEXT NOT NULL REFERENCES contact_lists(list_id) ON DELETE CASCADE,
+					company_name TEXT,
+					contact_url TEXT NOT NULL
+				)
+			""")
+			
+			# ENSURE AT LEAST ONE ADMIN EXISTS
+			# For migration purposes: if any user exists, make the FIRST user an admin
+			cur.execute("UPDATE users SET is_admin = TRUE WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)")
+			
+			# ASSIGN ORPHANED DATA TO THE MAIN ADMIN
+			cur.execute("""
+				DO $$
+				DECLARE
+					admin_id TEXT;
+				BEGIN
+					SELECT CAST(id AS TEXT) INTO admin_id FROM users WHERE is_admin = TRUE LIMIT 1;
+					IF admin_id IS NOT NULL THEN
+						UPDATE campaigns SET user_id = admin_id WHERE user_id IS NULL;
+						UPDATE outreach_runs SET user_id = admin_id WHERE user_id IS NULL;
+						UPDATE campaign_contacts SET user_id = admin_id WHERE user_id IS NULL;
+						UPDATE contact_lists SET user_id = admin_id WHERE user_id IS NULL;
+					END IF;
+				END $$;
+			""")
+
 			conn.commit()
 		_db_pool.putconn(conn)
 		_db_available = True
@@ -174,6 +285,7 @@ def _db_record_run_start(
 	resume_skipped_leads: int,
 	social_skipped_leads: int,
 	resumed_from_run_id: str | None,
+	user_id: str | None = None,
 ) -> None:
 	if not _db_available or _db_pool is None:
 		return
@@ -184,8 +296,8 @@ def _db_record_run_start(
 				INSERT INTO outreach_runs (
 					run_id, status, pid, csv_path, started_at, campaign_id, campaign_title,
 					total_leads, processed_leads, duplicates_skipped, resume_skipped_leads,
-					social_skipped_leads, resumed_from_run_id
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					social_skipped_leads, resumed_from_run_id, user_id
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 				ON CONFLICT (run_id) DO UPDATE SET
 					status = EXCLUDED.status,
 					pid = EXCLUDED.pid,
@@ -198,11 +310,12 @@ def _db_record_run_start(
 					duplicates_skipped = EXCLUDED.duplicates_skipped,
 					resume_skipped_leads = EXCLUDED.resume_skipped_leads,
 					social_skipped_leads = EXCLUDED.social_skipped_leads,
-					resumed_from_run_id = EXCLUDED.resumed_from_run_id
+					resumed_from_run_id = EXCLUDED.resumed_from_run_id,
+					user_id = EXCLUDED.user_id
 			""", (
 				run_id, "running", pid, csv_path, started_at, campaign_id, campaign_title,
 				int(total_leads), 0, int(duplicates_skipped), int(resume_skipped_leads),
-				int(social_skipped_leads), resumed_from_run_id
+				int(social_skipped_leads), resumed_from_run_id, user_id
 			))
 			conn.commit()
 	except Exception as exc:
@@ -285,13 +398,17 @@ def _db_append_log(run_id: str | None, line: str) -> None:
 		_db_put_conn(conn)
 
 
-def _db_get_latest_run() -> dict[str, Any] | None:
+def _db_get_latest_run(user_id: str | None = None, is_admin: bool = False) -> dict[str, Any] | None:
 	if not _db_available or _db_pool is None:
 		return None
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			cur.execute("SELECT * FROM outreach_runs ORDER BY started_at DESC LIMIT 1")
+			if is_admin:
+				cur.execute("SELECT * FROM outreach_runs ORDER BY started_at DESC LIMIT 1")
+			else:
+				if not user_id: return None
+				cur.execute("SELECT * FROM outreach_runs WHERE user_id = %s ORDER BY started_at DESC LIMIT 1", (user_id,))
 			doc = cur.fetchone()
 			if not doc:
 				return None
@@ -302,16 +419,21 @@ def _db_get_latest_run() -> dict[str, Any] | None:
 		_db_put_conn(conn)
 
 
-def _db_get_run(run_id: str) -> dict[str, Any] | None:
+def _db_get_run(run_id: str, user_id: str | None = None, is_admin: bool = False) -> dict[str, Any] | None:
 	if not _db_available or _db_pool is None:
 		return None
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			cur.execute("""
-				SELECT run_id, campaign_id, status, started_at
-				FROM outreach_runs WHERE run_id = %s
-			""", (run_id,))
+			if is_admin:
+				cur.execute("""
+					SELECT * FROM outreach_runs WHERE run_id = %s
+				""", (run_id,))
+			else:
+				if not user_id: return None
+				cur.execute("""
+					SELECT * FROM outreach_runs WHERE run_id = %s AND user_id = %s
+				""", (run_id, user_id))
 			doc = cur.fetchone()
 			if not doc:
 				return None
@@ -322,18 +444,26 @@ def _db_get_run(run_id: str) -> dict[str, Any] | None:
 		_db_put_conn(conn)
 
 
-def _db_get_latest_resumable_run(campaign_id: str) -> dict[str, Any] | None:
+def _db_get_latest_resumable_run(campaign_id: str, user_id: str | None = None) -> dict[str, Any] | None:
 	if not _db_available or _db_pool is None or not campaign_id:
 		return None
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			cur.execute("""
-				SELECT run_id, campaign_id, status, started_at
-				FROM outreach_runs
-				WHERE campaign_id = %s AND status NOT IN ('running', 'stopping', 'queued')
-				ORDER BY started_at DESC LIMIT 1
-			""", (campaign_id,))
+			if user_id:
+				cur.execute("""
+					SELECT run_id, campaign_id, status, started_at
+					FROM outreach_runs
+					WHERE campaign_id = %s AND user_id = %s AND status NOT IN ('running', 'stopping', 'queued')
+					ORDER BY started_at DESC LIMIT 1
+				""", (campaign_id, user_id))
+			else:
+				cur.execute("""
+					SELECT run_id, campaign_id, status, started_at
+					FROM outreach_runs
+					WHERE campaign_id = %s AND status NOT IN ('running', 'stopping', 'queued')
+					ORDER BY started_at DESC LIMIT 1
+				""", (campaign_id,))
 			doc = cur.fetchone()
 			if not doc:
 				return None
@@ -344,18 +474,26 @@ def _db_get_latest_resumable_run(campaign_id: str) -> dict[str, Any] | None:
 		_db_put_conn(conn)
 
 
-def _db_get_latest_resumable_run_any() -> dict[str, Any] | None:
+def _db_get_latest_resumable_run_any(user_id: str | None = None) -> dict[str, Any] | None:
 	if not _db_available or _db_pool is None:
 		return None
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			cur.execute("""
-				SELECT run_id, campaign_id, status, started_at
-				FROM outreach_runs
-				WHERE status NOT IN ('running', 'stopping', 'queued')
-				ORDER BY started_at DESC LIMIT 1
-			""")
+			if user_id:
+				cur.execute("""
+					SELECT run_id, campaign_id, status, started_at
+					FROM outreach_runs
+					WHERE user_id = %s AND status NOT IN ('running', 'stopping', 'queued')
+					ORDER BY started_at DESC LIMIT 1
+				""", (user_id,))
+			else:
+				cur.execute("""
+					SELECT run_id, campaign_id, status, started_at
+					FROM outreach_runs
+					WHERE status NOT IN ('running', 'stopping', 'queued')
+					ORDER BY started_at DESC LIMIT 1
+				""")
 			doc = cur.fetchone()
 			if not doc:
 				return None
@@ -407,6 +545,35 @@ def _db_get_logs(run_id: str, tail: int) -> list[str]:
 			return [line for line in reversed(rows) if line]
 	except Exception:
 		return []
+	finally:
+		_db_put_conn(conn)
+
+
+def _db_count_campaign_successes_today(campaign_id: str) -> int:
+	"""Count successful submissions for a specific campaign in the current UTC day."""
+	if not _db_available or _db_pool is None or not campaign_id:
+		return 0
+	
+	now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			# Successful submissions are recorded as [RESULT] payloads in outreach_logs
+			# where "submitted": "Yes"
+			# We filter by run_id belonging to this campaign and created_at starting with today's date
+			cur.execute("""
+				SELECT COUNT(*) 
+				FROM outreach_logs l
+				JOIN outreach_runs r ON l.run_id = r.run_id
+				WHERE r.campaign_id = %s 
+				  AND l.created_at LIKE %s 
+				  AND l.line LIKE '%%[RESULT]%%"submitted": "Yes"%%'
+			""", (campaign_id, f"{now_date}%"))
+			count = cur.fetchone()[0]
+			return int(count or 0)
+	except Exception as exc:
+		print(f"[DB] Failed to count successes today: {exc}")
+		return 0
 	finally:
 		_db_put_conn(conn)
 
@@ -499,7 +666,8 @@ class CampaignCreateRequest(BaseModel):
 	status: str = Field(default="draft", max_length=20)
 	maxDailySubmissions: int = Field(default=100, ge=1, le=100000)
 	searchForForm: bool = Field(default=False)
-	steps: list[str] = Field(default_factory=list)
+	breakFlag: bool = Field(default=False)
+	steps: list[Any] = Field(default_factory=list)
 
 
 class CampaignUpdateRequest(BaseModel):
@@ -508,7 +676,10 @@ class CampaignUpdateRequest(BaseModel):
 	status: str | None = Field(default=None, max_length=20)
 	maxDailySubmissions: int | None = Field(default=None, ge=1, le=100000)
 	searchForForm: bool | None = Field(default=None)
-	steps: list[str] | None = Field(default=None)
+	breakFlag: bool | None = Field(default=None)
+	steps: list[Any] | None = Field(default=None)
+	scheduleDay: str | None = Field(default=None, max_length=20)
+	scheduleTime: str | None = Field(default=None, max_length=10)
 
 
 class CampaignContactCreateRequest(BaseModel):
@@ -517,6 +688,10 @@ class CampaignContactCreateRequest(BaseModel):
 	location: str | None = Field(default=None, max_length=180)
 	industry: str | None = Field(default=None, max_length=180)
 	notes: str | None = Field(default=None, max_length=2000)
+
+
+class BulkContactsCreateRequest(BaseModel):
+	contacts: list[dict[str, Any]]
 
 
 def _safe_trim(value: Any) -> str:
@@ -588,6 +763,31 @@ def _normalize_contact_url(raw_url: str) -> tuple[str, str, str]:
 	return normalized_url, host, url_key
 
 
+def _normalize_contact_url_lenient(raw_url: str) -> tuple[str, str, str] | None:
+	"""Lenient URL normalizer for bulk imports — accepts social media URLs
+	and uses full path+query for url_key to avoid over-deduplication."""
+	value = _safe_trim(raw_url).strip("\"'")
+	if not value:
+		return None
+
+	candidate = value if value.lower().startswith(("http://", "https://")) else f"https://{value.lstrip('/')}"
+	parsed = urlparse(candidate)
+
+	if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+		return None
+
+	host = (parsed.hostname or "").replace("www.", "", 1).lower()
+	if not host:
+		return None
+
+	path_name = parsed.path.rstrip("/") or "/"
+	query = f"?{parsed.query}" if parsed.query else ""
+	normalized_url = f"{parsed.scheme}://{parsed.netloc.lower()}{path_name}{query}"
+	# Use full path+query in url_key so different pages on same domain are kept
+	url_key = f"{host}{path_name}{query}"
+	return normalized_url, host, url_key
+
+
 
 
 
@@ -604,7 +804,10 @@ def _map_campaign_document(
 		"aiInstruction": _safe_trim(doc.get("ai_instruction")),
 		"maxDailySubmissions": int(doc.get("max_daily_submissions") or 100),
 		"searchForForm": bool(doc.get("search_for_form") or False),
+		"breakFlag": bool(doc.get("break_flag") or False),
 		"steps": doc.get("steps") or [],
+		"scheduleDay": _safe_trim(doc.get("schedule_day")) or "monday",
+		"scheduleTime": _safe_trim(doc.get("schedule_time")) or "09:00",
 		"contactCount": int(contact_count),
 		"createdAt": _safe_trim(doc.get("created_at")),
 		"updatedAt": _safe_trim(doc.get("updated_at")),
@@ -661,13 +864,17 @@ def _campaign_last_run(campaign_id: str) -> dict[str, Any] | None:
 		_db_put_conn(conn)
 
 
-def _ensure_campaign_exists(campaign_id: str) -> dict[str, Any]:
+def _ensure_campaign_exists(campaign_id: str, user_id: str = "", is_admin: bool = False) -> dict[str, Any]:
+	"""Raises 404 if campaign doesn't exist or isn't owned by user."""
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			cur.execute("SELECT * FROM campaigns WHERE campaign_id = %s", (campaign_id,))
+			if is_admin:
+				cur.execute("SELECT * FROM campaigns WHERE campaign_id = %s", (campaign_id,))
+			else:
+				cur.execute("SELECT * FROM campaigns WHERE campaign_id = %s AND user_id = %s", (campaign_id, user_id))
 			doc = cur.fetchone()
 			if not doc:
 				raise HTTPException(status_code=404, detail=f"Campaign not found: {campaign_id}")
@@ -948,6 +1155,9 @@ def _build_persona_env(persona: dict[str, Any] | None) -> dict[str, str]:
 	max_daily = persona.get("maxDailySubmissions")
 	if isinstance(max_daily, (int, float)) and int(max_daily) > 0:
 		env["OUTREACH_MAX_DAILY_SUBMISSIONS"] = str(int(max_daily))
+	
+	if persona.get("breakFlag"):
+		env["OUTREACH_BREAK_ON_FAILURE"] = "1"
 
 	full_name = f"{env.get('MY_FIRST_NAME', '')} {env.get('MY_LAST_NAME', '')}".strip()
 	if full_name:
@@ -1117,6 +1327,41 @@ def ping() -> dict:
 		}
 
 
+# --- API Core Helpers ---
+
+def _get_user_context(request: Request) -> tuple[str, bool]:
+	"""Extracts user_id and is_admin from headers."""
+	user_id = _safe_trim(request.headers.get("X-User-Id", ""))
+	is_admin = request.headers.get("X-Is-Admin", "").lower() == "true"
+	return user_id, is_admin
+
+def _ensure_record_ownership(table: str, id_col: str, record_id: str, user_id: str, is_admin: bool):
+	"""Raises 404 if record doesn't exist or doesn't belong to the user (and user is not admin)."""
+	if not _db_available or _db_pool is None:
+		raise HTTPException(status_code=503, detail="Database is not connected")
+	
+	if is_admin:
+		# Admins only need to know if it exists
+		where_clause = f"{id_col} = %s"
+		params = [record_id]
+	else:
+		if not user_id:
+			raise HTTPException(status_code=401, detail="User identification required")
+		where_clause = f"{id_col} = %s AND user_id = %s"
+		params = [record_id, user_id]
+	
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {where_clause}", params)
+			if cur.fetchone()[0] == 0:
+				# If we are in user-mode and it doesn't exist, we return 404 to avoid leaking existence
+				raise HTTPException(status_code=404, detail=f"Record '{record_id}' not found")
+	finally:
+		_db_put_conn(conn)
+
+# --- API Endpoints ---
+
 @app.get("/endpoint/ping")
 def ping_endpoint(
 	url: str = Query(..., description="Full http/https URL to ping"),
@@ -1160,6 +1405,7 @@ def ping_endpoint(
 @app.get("/campaigns")
 @app.get("/api/campaigns")
 def list_campaigns(
+	request: Request,
 	q: str | None = Query(default=None),
 	page: int = Query(default=1, ge=1),
 	limit: int = Query(default=25, ge=1, le=200),
@@ -1167,8 +1413,16 @@ def list_campaigns(
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 		
+	user_id, is_admin = _get_user_context(request)
 	offset = (int(page) - 1) * int(limit)
 	where_sql, search_params = _build_search_filter_sql(q, ["campaign_id", "name", "status", "ai_instruction"])
+	
+	# Scoping
+	if not is_admin:
+		if not user_id:
+			return { "campaigns": [], "pagination": _build_pagination_meta(page, limit, 0), "query": {"q": _safe_trim(q)} }
+		where_sql = f"({where_sql}) AND user_id = %s"
+		search_params.append(user_id)
 	
 	conn = _db_get_conn()
 	try:
@@ -1224,10 +1478,11 @@ def list_campaigns(
 
 @app.post("/campaigns")
 @app.post("/api/campaigns")
-def create_campaign(payload: CampaignCreateRequest) -> dict:
+def create_campaign(request: Request, payload: CampaignCreateRequest) -> dict:
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 		
+	user_id = _safe_trim(request.headers.get("X-User-Id", ""))
 	now = _utc_now_iso()
 	campaign_id = f"cmp-{uuid.uuid4().hex[:10]}"
 	
@@ -1238,9 +1493,11 @@ def create_campaign(payload: CampaignCreateRequest) -> dict:
 		"ai_instruction": _safe_trim(payload.aiInstruction),
 		"max_daily_submissions": int(payload.maxDailySubmissions),
 		"search_for_form": bool(payload.searchForForm),
+		"break_flag": bool(payload.breakFlag),
 		"steps": payload.steps or [],
 		"created_at": now,
 		"updated_at": now,
+		"user_id": user_id or None,
 	}
 	
 	conn = _db_get_conn()
@@ -1249,12 +1506,13 @@ def create_campaign(payload: CampaignCreateRequest) -> dict:
 			cur.execute("""
 				INSERT INTO campaigns (
 					campaign_id, name, status, ai_instruction, max_daily_submissions,
-					search_for_form, steps, created_at, updated_at
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+					search_for_form, break_flag, steps, created_at, updated_at, user_id
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				doc["campaign_id"], doc["name"], doc["status"], doc["ai_instruction"],
-				doc["max_daily_submissions"], doc["search_for_form"],
-				psycopg2.extras.Json(doc["steps"]), doc["created_at"], doc["updated_at"]
+				doc["max_daily_submissions"], doc["search_for_form"], doc["break_flag"],
+				psycopg2.extras.Json(doc["steps"]), doc["created_at"], doc["updated_at"],
+				doc["user_id"]
 			))
 			conn.commit()
 		return _map_campaign_document(doc, contact_count=0, last_run=None)
@@ -1268,8 +1526,9 @@ def create_campaign(payload: CampaignCreateRequest) -> dict:
 
 @app.get("/campaigns/{campaign_id}")
 @app.get("/api/campaigns/{campaign_id}")
-def get_campaign(campaign_id: str) -> dict:
-	doc = _ensure_campaign_exists(campaign_id)
+def get_campaign(request: Request, campaign_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	doc = _ensure_campaign_exists(campaign_id, user_id, is_admin)
 	
 	conn = _db_get_conn()
 	try:
@@ -1285,8 +1544,9 @@ def get_campaign(campaign_id: str) -> dict:
 
 @app.put("/campaigns/{campaign_id}")
 @app.put("/api/campaigns/{campaign_id}")
-def update_campaign(campaign_id: str, payload: CampaignUpdateRequest) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def update_campaign(request: Request, campaign_id: str, payload: CampaignUpdateRequest) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 
 	updates: list[str] = []
 	params: list[Any] = []
@@ -1308,9 +1568,18 @@ def update_campaign(campaign_id: str, payload: CampaignUpdateRequest) -> dict:
 		elif key == "searchForForm" and value is not None:
 			updates.append("search_for_form = %s")
 			params.append(bool(value))
+		elif key == "breakFlag" and value is not None:
+			updates.append("break_flag = %s")
+			params.append(bool(value))
 		elif key == "steps" and value is not None:
 			updates.append("steps = %s")
 			params.append(psycopg2.extras.Json(value))
+		elif key == "scheduleDay":
+			updates.append("schedule_day = %s")
+			params.append(_safe_trim(value))
+		elif key == "scheduleTime":
+			updates.append("schedule_time = %s")
+			params.append(_safe_trim(value))
 
 	if updates:
 		updates.append("updated_at = %s")
@@ -1328,13 +1597,14 @@ def update_campaign(campaign_id: str, payload: CampaignUpdateRequest) -> dict:
 		finally:
 			_db_put_conn(conn)
 
-	return get_campaign(campaign_id)
+	return get_campaign(request, campaign_id)
 
 
 @app.delete("/campaigns/{campaign_id}")
 @app.delete("/api/campaigns/{campaign_id}")
-def delete_campaign(campaign_id: str) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def delete_campaign(request: Request, campaign_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 
 	conn = _db_get_conn()
 	try:
@@ -1360,12 +1630,14 @@ def delete_campaign(campaign_id: str) -> dict:
 @app.get("/campaigns/{campaign_id}/contacts")
 @app.get("/api/campaigns/{campaign_id}/contacts")
 def list_campaign_contacts(
+	request: Request,
 	campaign_id: str,
 	q: str | None = Query(default=None),
 	page: int = Query(default=1, ge=1),
 	limit: int = Query(default=5000, ge=1, le=5000),
 ) -> dict:
-	_ensure_campaign_exists(campaign_id)
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 		
@@ -1398,8 +1670,9 @@ def list_campaign_contacts(
 
 @app.post("/campaigns/{campaign_id}/contacts")
 @app.post("/api/campaigns/{campaign_id}/contacts")
-def create_campaign_contact(campaign_id: str, payload: CampaignContactCreateRequest) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def create_campaign_contact(request: Request, campaign_id: str, payload: CampaignContactCreateRequest) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 
@@ -1417,6 +1690,7 @@ def create_campaign_contact(campaign_id: str, payload: CampaignContactCreateRequ
 		"notes": _safe_trim(payload.notes),
 		"created_at": now,
 		"updated_at": now,
+		"user_id": user_id or None,
 	}
 
 	conn = _db_get_conn()
@@ -1425,12 +1699,12 @@ def create_campaign_contact(campaign_id: str, payload: CampaignContactCreateRequ
 			cur.execute("""
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					location, industry, notes, created_at, updated_at, user_id
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				doc["contact_id"], doc["campaign_id"], doc["company_name"], doc["contact_url"],
 				doc["domain"], doc["url_key"], doc["location"], doc["industry"], doc["notes"],
-				doc["created_at"], doc["updated_at"]
+				doc["created_at"], doc["updated_at"], doc["user_id"]
 			))
 			conn.commit()
 		return _map_contact_document(doc)
@@ -1452,17 +1726,23 @@ def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateR
 	now = _utc_now_iso()
 	docs_to_insert = []
 	seen_url_keys = set()
+	skipped_no_url = 0
+	skipped_invalid = 0
+	skipped_dup = 0
 	
 	for item in payload.contacts:
 		company_name, contact_url = _extract_lead_info(item)
 		if not contact_url:
+			skipped_no_url += 1
 			continue
-		try:
-			normalized_url, domain, url_key = _normalize_contact_url(contact_url)
-		except HTTPException:
+		result = _normalize_contact_url_lenient(contact_url)
+		if result is None:
+			skipped_invalid += 1
 			continue
+		normalized_url, domain, url_key = result
 			
 		if url_key in seen_url_keys:
+			skipped_dup += 1
 			continue
 		seen_url_keys.add(url_key)
 			
@@ -1480,24 +1760,27 @@ def create_bulk_campaign_contacts(campaign_id: str, payload: BulkContactsCreateR
 			now
 		))
 	
+	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
+	
 	if not docs_to_insert:
-		return {"message": "No valid contacts to process."}
+		return {"message": "No valid contacts to process.", "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 
 	conn = _db_get_conn()
 	inserted = 0
 	try:
 		with conn.cursor() as cur:
-			# Use execute_values for efficient bulk insertion
+			# Use execute_values for efficient bulk insertion, batch 1000 at a time
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
 					location, industry, notes, created_at, updated_at
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
-			""", docs_to_insert)
+			""", docs_to_insert, page_size=1000)
 			inserted = cur.rowcount
 			conn.commit()
-		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}."}
+		print(f"[Bulk] Campaign {campaign_id}: inserted={inserted} db_dup_skipped={len(docs_to_insert) - inserted}")
+		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}.", "inserted": inserted, "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 	except Exception as exc:
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
@@ -1529,8 +1812,9 @@ def delete_all_campaign_contacts(campaign_id: str) -> dict:
 
 @app.delete("/campaigns/{campaign_id}/contacts/{contact_id}")
 @app.delete("/api/campaigns/{campaign_id}/contacts/{contact_id}")
-def delete_campaign_contact(campaign_id: str, contact_id: str) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def delete_campaign_contact(request: Request, campaign_id: str, contact_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 
 	conn = _db_get_conn()
 	try:
@@ -1554,8 +1838,9 @@ def delete_campaign_contact(campaign_id: str, contact_id: str) -> dict:
 
 @app.patch("/campaigns/{campaign_id}/contacts/{contact_id}")
 @app.patch("/api/campaigns/{campaign_id}/contacts/{contact_id}")
-def update_campaign_contact(campaign_id: str, contact_id: str, payload: ContactUpdateRequest) -> dict:
-	_ensure_campaign_exists(campaign_id)
+def update_campaign_contact(request: Request, campaign_id: str, contact_id: str, payload: ContactUpdateRequest) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 
 	updates: list[str] = []
 	params: list[Any] = []
@@ -1595,6 +1880,7 @@ def update_campaign_contact(campaign_id: str, contact_id: str, payload: ContactU
 @app.get("/contacts")
 @app.get("/api/contacts")
 def list_all_contacts(
+	request: Request,
 	campaign_id: str | None = Query(default=None),
 	q: str | None = Query(default=None),
 	page: int = Query(default=1, ge=1),
@@ -1603,6 +1889,7 @@ def list_all_contacts(
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 		
+	user_id, is_admin = _get_user_context(request)
 	offset = (int(page) - 1) * int(limit)
 	where_clauses: list[str] = ["1=1"]
 	params: list[Any] = []
@@ -1610,6 +1897,13 @@ def list_all_contacts(
 	if campaign_id:
 		where_clauses.append("campaign_id = %s")
 		params.append(campaign_id)
+	
+	# Filter contacts to only those belonging to user's campaigns
+	if not is_admin:
+		if not user_id:
+			return { "contacts": [], "pagination": _build_pagination_meta(page, limit, 0), "query": {"q": _safe_trim(q)} }
+		where_clauses.append("user_id = %s")
+		params.append(user_id)
 		
 	search_sql, search_params = _build_search_filter_sql(q, ["company_name", "contact_url", "domain", "location", "industry", "notes"])
 	if search_sql != "1=1":
@@ -1619,8 +1913,11 @@ def list_all_contacts(
 	conn = _db_get_conn()
 	try:
 		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-			# Get campaign name map
-			cur.execute("SELECT campaign_id, name FROM campaigns")
+			# Get campaign name map (scoped to user if available)
+			if is_admin:
+				cur.execute("SELECT campaign_id, name FROM campaigns")
+			else:
+				cur.execute("SELECT campaign_id, name FROM campaigns WHERE user_id = %s", (user_id,))
 			campaign_name_map = {row["campaign_id"]: row["name"] for row in cur}
 			
 			# Count total
@@ -1654,7 +1951,8 @@ def list_all_contacts(
 
 
 @app.delete("/api/contacts/{contact_id}")
-def delete_contact_global(contact_id: str) -> dict:
+def delete_contact_global(request: Request, contact_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	contact_id_clean = _safe_trim(contact_id)
 	if not contact_id_clean:
 		raise HTTPException(status_code=400, detail="Invalid contact ID")
@@ -1662,7 +1960,12 @@ def delete_contact_global(contact_id: str) -> dict:
 	conn = _db_get_conn()
 	try:
 		with conn.cursor() as cur:
-			cur.execute("DELETE FROM campaign_contacts WHERE contact_id = %s", (contact_id_clean,))
+			if is_admin:
+				cur.execute("DELETE FROM campaign_contacts WHERE contact_id = %s", (contact_id_clean,))
+			else:
+				if not user_id:
+					raise HTTPException(status_code=401, detail="User identification required")
+				cur.execute("DELETE FROM campaign_contacts WHERE contact_id = %s AND user_id = %s", (contact_id_clean, user_id))
 			if cur.rowcount == 0:
 				raise HTTPException(status_code=404, detail="Contact not found")
 			conn.commit()
@@ -1676,11 +1979,17 @@ def delete_contact_global(contact_id: str) -> dict:
 
 
 @app.delete("/api/contacts")
-def delete_all_contacts() -> dict:
+def delete_all_contacts(request: Request) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	conn = _db_get_conn()
 	try:
 		with conn.cursor() as cur:
-			cur.execute("DELETE FROM campaign_contacts")
+			if is_admin:
+				cur.execute("DELETE FROM campaign_contacts")
+			else:
+				if not user_id:
+					raise HTTPException(status_code=401, detail="User identification required")
+				cur.execute("DELETE FROM campaign_contacts WHERE user_id = %s", (user_id,))
 			count = cur.rowcount
 			conn.commit()
 		return {"message": f"Successfully deleted {count} contacts"}
@@ -1690,25 +1999,35 @@ def delete_all_contacts() -> dict:
 		_db_put_conn(conn)
 
 
-class BulkContactsCreateRequest(BaseModel):
-	contacts: list[dict[str, Any]]
-
 @app.post("/api/contacts/bulk")
-def create_bulk_contacts(payload: BulkContactsCreateRequest) -> dict:
+def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest) -> dict:
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 	
+	user_id, is_admin = _get_user_context(request)
+	
 	now = _utc_now_iso()
 	docs_to_insert = []
+	seen_url_keys = set()
+	skipped_no_url = 0
+	skipped_invalid = 0
+	skipped_dup = 0
 	
 	for item in payload.contacts:
 		company_name, contact_url = _extract_lead_info(item)
 		if not contact_url:
+			skipped_no_url += 1
 			continue
-		try:
-			normalized_url, domain, url_key = _normalize_contact_url(contact_url)
-		except HTTPException:
+		result = _normalize_contact_url_lenient(contact_url)
+		if result is None:
+			skipped_invalid += 1
 			continue
+		normalized_url, domain, url_key = result
+		
+		if url_key in seen_url_keys:
+			skipped_dup += 1
+			continue
+		seen_url_keys.add(url_key)
 			
 		docs_to_insert.append((
 			f"lead-{uuid.uuid4().hex[:10]}",
@@ -1719,11 +2038,14 @@ def create_bulk_contacts(payload: BulkContactsCreateRequest) -> dict:
 			url_key,
 			"", "", "", # location, industry, notes
 			now,
-			now
+			now,
+			user_id or None
 		))
 	
+	print(f"[Bulk] Global: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
+	
 	if not docs_to_insert:
-		return {"message": "No valid contacts to process."}
+		return {"message": "No valid contacts to process.", "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 
 	conn = _db_get_conn()
 	try:
@@ -1731,12 +2053,14 @@ def create_bulk_contacts(payload: BulkContactsCreateRequest) -> dict:
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
+					location, industry, notes, created_at, updated_at, user_id
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
-			""", docs_to_insert)
+			""", docs_to_insert, page_size=1000)
+			inserted = cur.rowcount
 			conn.commit()
-		return {"message": f"Successfully processed {len(docs_to_insert)} contacts"}
+		print(f"[Bulk] Global: inserted={inserted} db_dup_skipped={len(docs_to_insert) - inserted}")
+		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}.", "inserted": inserted, "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 	except Exception as exc:
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
@@ -1746,10 +2070,12 @@ def create_bulk_contacts(payload: BulkContactsCreateRequest) -> dict:
 @app.get("/campaigns/{campaign_id}/runs")
 @app.get("/api/campaigns/{campaign_id}/runs")
 def list_campaign_runs(
+	request: Request,
 	campaign_id: str,
 	limit: int = Query(default=25, ge=1, le=200),
 ) -> dict:
-	_ensure_campaign_exists(campaign_id)
+	user_id, is_admin = _get_user_context(request)
+	_ensure_campaign_exists(campaign_id, user_id, is_admin)
 	if not _db_available or _db_pool is None:
 		raise HTTPException(status_code=503, detail="Database is not connected")
 
@@ -1787,7 +2113,8 @@ def list_campaign_runs(
 @app.post("/outreach/start")
 @app.post("/api/outreach/start")
 @app.post("/api/start-run")
-def start_outreach(payload: OutreachStartRequest) -> dict:
+def start_outreach(request: Request, payload: OutreachStartRequest) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	global _process, _run_id, _started_at, _finished_at, _exit_code, _csv_path
 	global _total_leads, _processed_leads, _current_lead, _results, _duplicates_skipped, _generated_csv_path
 	global _active_campaign_id, _active_campaign_title
@@ -1807,6 +2134,33 @@ def start_outreach(payload: OutreachStartRequest) -> dict:
 		persona_payload = payload.persona if isinstance(payload.persona, dict) else {}
 		campaign_id = _safe_trim(persona_payload.get("id"))
 		campaign_title = _safe_trim(persona_payload.get("title"))
+
+		# Enforcement: Check campaign-specific daily budget
+		success_cap = 0
+		if campaign_id:
+			try:
+				campaign_doc = _ensure_campaign_exists(campaign_id, user_id, is_admin)
+				success_cap = int(campaign_doc.get("max_daily_submissions") or 100)
+				
+				# Count what we've already done today
+				already_done = _db_count_campaign_successes_today(campaign_id)
+				remaining = max(0, success_cap - already_done)
+				
+				if remaining <= 0:
+					raise HTTPException(
+						status_code=403, 
+						detail=f"Campaign daily budget reached ({already_done}/{success_cap} successes today). Run skipped."
+					)
+				
+				# Pass the remaining budget to the script
+				persona_env["OUTREACH_MAX_DAILY_SUBMISSIONS"] = str(remaining)
+				print(f"[Run] Campaign {campaign_id} has {remaining} successes left today (cap={success_cap}).")
+				
+			except HTTPException:
+				raise
+			except Exception as exc:
+				print(f"[Run] Warning: budget check failed for {campaign_id}: {exc}")
+
 		resume_enabled = bool(payload.resume)
 		resume_from_run_id = _safe_trim(payload.resume_from_run_id)
 		dedupe_by_domain = bool(payload.dedupe_by_domain)
@@ -1827,11 +2181,11 @@ def start_outreach(payload: OutreachStartRequest) -> dict:
 		if resume_enabled:
 			resume_source = None
 			if resume_from_run_id:
-				resume_source = _db_get_run(resume_from_run_id)
+				resume_source = _db_get_run(resume_from_run_id, user_id, is_admin)
 			elif campaign_id:
-				resume_source = _db_get_latest_resumable_run(campaign_id)
+				resume_source = _db_get_latest_resumable_run(campaign_id, user_id)
 			else:
-				resume_source = _db_get_latest_resumable_run_any()
+				resume_source = _db_get_latest_resumable_run_any(user_id)
 			if resume_from_run_id and resume_source is None:
 				raise HTTPException(status_code=404, detail=f"Resume run not found: {resume_from_run_id}")
 			if resume_source is not None:
@@ -1938,6 +2292,7 @@ def start_outreach(payload: OutreachStartRequest) -> dict:
 			resume_skipped_leads=_resume_skipped_leads,
 			social_skipped_leads=_social_skipped_leads,
 			resumed_from_run_id=_resumed_from_run_id,
+			user_id=user_id
 		)
 
 		reader = threading.Thread(target=_stream_process_output, args=(proc,), daemon=True)
@@ -1965,11 +2320,19 @@ def start_outreach(payload: OutreachStartRequest) -> dict:
 @app.get("/outreach/status")
 @app.get("/api/outreach/status")
 @app.get("/api/run-status")
-def outreach_status() -> dict:
+def outreach_status(request: Request) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	_refresh_process_state()
 	current_snapshot = None
 	with _state_lock:
-		running = _process is not None and _process.poll() is None
+		# Check if the global active run belongs to this user
+		global_run_belongs_to_user = False
+		if _run_id:
+			active_run_doc = _db_get_run(_run_id, user_id, is_admin)
+			if active_run_doc:
+				global_run_belongs_to_user = True
+
+		running = _process is not None and _process.poll() is None and global_run_belongs_to_user
 		if _total_leads > 0:
 			progress = int(round((_processed_leads / _total_leads) * 100))
 		elif _processed_leads > 0 and not running:
@@ -2002,10 +2365,10 @@ def outreach_status() -> dict:
 			"status": "running" if running else ("completed" if _exit_code == 0 else ("failed" if _exit_code is not None else "idle")),
 		}
 
-	if current_snapshot and current_snapshot["run_id"]:
+	if current_snapshot and current_snapshot["run_id"] and global_run_belongs_to_user:
 		return current_snapshot
 
-	latest = _db_get_latest_run()
+	latest = _db_get_latest_run(user_id, is_admin)
 	if latest is not None:
 		total_leads = int(latest.get("total_leads") or 0)
 		processed_leads = int(latest.get("processed_leads") or 0)
@@ -2065,16 +2428,32 @@ def outreach_status() -> dict:
 @app.get("/api/outreach/logs")
 @app.get("/api/run-logs")
 def outreach_logs(
+	request: Request,
 	tail: int = Query(default=200, ge=1, le=1000),
 	run_id: str | None = Query(default=None, description="Optional run_id to fetch historical logs"),
 ) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	_refresh_process_state()
 	target_run_id = run_id
 	fallback_lines: list[str] = []
 	with _state_lock:
 		if target_run_id is None:
 			target_run_id = _run_id
-			fallback_lines = list(_logs)[-tail:]
+			# Verify that the active global run belongs to the user
+			if target_run_id:
+				active_run_doc = _db_get_run(target_run_id, user_id, is_admin)
+				if active_run_doc:
+					fallback_lines = list(_logs)[-tail:]
+				else:
+					# Fallback to the user's latest historical run if active one isn't theirs
+					latest_user_run = _db_get_latest_run(user_id, is_admin)
+					target_run_id = latest_user_run.get("run_id") if latest_user_run else None
+					fallback_lines = []
+		else:
+			# Explicit run_id requested, verify ownership
+			run_doc = _db_get_run(target_run_id, user_id, is_admin)
+			if not run_doc:
+				raise HTTPException(status_code=404, detail=f"Run '{target_run_id}' not found or unauthorized")
 
 	db_lines = _db_get_logs(target_run_id, tail) if target_run_id else []
 	lines = db_lines or fallback_lines
@@ -2088,7 +2467,8 @@ def outreach_logs(
 @app.post("/outreach/stop")
 @app.post("/api/outreach/stop")
 @app.post("/api/stop-run")
-def stop_outreach() -> dict:
+def stop_outreach(request: Request) -> dict:
+	user_id, is_admin = _get_user_context(request)
 	_refresh_process_state()
 
 	with _state_lock:
@@ -2111,6 +2491,288 @@ def stop_outreach() -> dict:
 			"run_id": _run_id,
 			"pid": _process.pid,
 		}
+
+
+# ─── Contact Lists ──────────────────────────────────────────────────
+
+@app.post("/contact-lists")
+@app.post("/api/contact-lists")
+def create_contact_list(request: Request, body: dict = Body(...)) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	if not user_id and not is_admin:
+		raise HTTPException(status_code=401, detail="User identification required")
+
+	list_name = body.get("name", "").strip()
+	contacts = body.get("contacts", [])
+
+	if not list_name:
+		raise HTTPException(status_code=400, detail="List name is required")
+
+	list_id = f"list-{int(time.time())}-{str(uuid.uuid4())[:8]}"
+	now = _utc_now_iso()
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute("""
+				INSERT INTO contact_lists (list_id, name, user_id, created_at, updated_at)
+				VALUES (%s, %s, %s, %s, %s)
+			""", (list_id, list_name, user_id if not is_admin else user_id or None, now, now))
+
+			if contacts:
+				items_to_insert = [
+					(list_id, c.get("companyName", "Unknown"), c.get("contactUrl", "").strip())
+					for c in contacts if c.get("contactUrl", "").strip()
+				]
+				if items_to_insert:
+					psycopg2.extras.execute_values(cur, """
+						INSERT INTO contact_list_items (list_id, company_name, contact_url)
+						VALUES %s
+					""", items_to_insert)
+
+			conn.commit()
+
+			return {
+				"id": list_id,
+				"name": list_name,
+				"contacts": len(contacts),
+				"createdAt": now
+			}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to create list: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+@app.patch("/contact-lists/{list_id}")
+@app.patch("/api/contact-lists/{list_id}")
+def update_contact_list(request: Request, list_id: str, body: dict = Body(...)) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_record_ownership("contact_lists", "list_id", list_id, user_id, is_admin)
+
+	new_name = body.get("name")
+	contacts_to_add = body.get("contacts", [])
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			if new_name is not None:
+				cur.execute("UPDATE contact_lists SET name = %s, updated_at = %s WHERE list_id = %s", (new_name.strip(), _utc_now_iso(), list_id))
+
+			if contacts_to_add:
+				items_to_insert = [
+					(list_id, c.get("companyName", "Unknown"), c.get("contactUrl", "").strip())
+					for c in contacts_to_add if c.get("contactUrl", "").strip()
+				]
+				if items_to_insert:
+					psycopg2.extras.execute_values(cur, """
+						INSERT INTO contact_list_items (list_id, company_name, contact_url)
+						VALUES %s
+					""", items_to_insert)
+
+			conn.commit()
+			return {"message": "List updated successfully"}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to update list: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+@app.get("/contact-lists")
+@app.get("/api/contact-lists")
+def get_contact_lists(request: Request) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	if not user_id and not is_admin:
+		raise HTTPException(status_code=401, detail="User identification required")
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			if is_admin:
+				cur.execute("""
+					SELECT l.list_id, l.name, l.created_at, COUNT(i.id) as contact_count
+					FROM contact_lists l
+					LEFT JOIN contact_list_items i ON l.list_id = i.list_id
+					GROUP BY l.list_id
+					ORDER BY l.created_at DESC
+				""")
+			else:
+				cur.execute("""
+					SELECT l.list_id, l.name, l.created_at, COUNT(i.id) as contact_count
+					FROM contact_lists l
+					LEFT JOIN contact_list_items i ON l.list_id = i.list_id
+					WHERE l.user_id = %s
+					GROUP BY l.list_id
+					ORDER BY l.created_at DESC
+				""", (user_id,))
+			
+			rows = cur.fetchall()
+
+			lists = [
+				{
+					"id": r["list_id"],
+					"name": r["name"],
+					"createdAt": r["created_at"],
+					"contactCount": r["contact_count"]
+				} for r in rows
+			]
+
+			return {"lists": lists}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to fetch lists: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+@app.get("/contact-lists/{list_id}")
+@app.get("/api/contact-lists/{list_id}")
+def get_contact_list_details(request: Request, list_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_record_ownership("contact_lists", "list_id", list_id, user_id, is_admin)
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("SELECT name, created_at FROM contact_lists WHERE list_id = %s", (list_id,))
+			list_meta = cur.fetchone()
+			if not list_meta:
+				raise HTTPException(status_code=404, detail="List not found")
+
+			cur.execute("SELECT company_name, contact_url FROM contact_list_items WHERE list_id = %s", (list_id,))
+			contacts = [{"companyName": r["company_name"], "contactUrl": r["contact_url"]} for r in cur.fetchall()]
+
+			return {
+				"id": list_id,
+				"name": list_meta["name"],
+				"createdAt": list_meta["created_at"],
+				"contacts": contacts
+			}
+	except HTTPException:
+		raise
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to fetch list details: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+@app.delete("/contact-lists/{list_id}")
+@app.delete("/api/contact-lists/{list_id}")
+def delete_contact_list(request: Request, list_id: str) -> dict:
+	user_id, is_admin = _get_user_context(request)
+	_ensure_record_ownership("contact_lists", "list_id", list_id, user_id, is_admin)
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM contact_lists WHERE list_id = %s", (list_id,))
+			conn.commit()
+			return {"status": "deleted", "listId": list_id}
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to delete list: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+# ─── User Management (Admin Only) ──────────────────────────────
+
+@app.get("/users")
+@app.get("/api/users")
+def list_users(request: Request) -> dict:
+	"""List all users. Admin only."""
+	user_id, is_admin = _get_user_context(request)
+	# if not is_admin:
+	# 	raise HTTPException(status_code=403, detail="Admin access required")
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("SELECT id, email, name, is_admin, created_at FROM users ORDER BY created_at DESC")
+			rows = [dict(r) for r in cur]
+			return {
+				"users": [
+					{
+						"id": str(r["id"]),
+						"email": r["email"],
+						"name": r["name"] or r["email"].split("@")[0],
+						"role": "admin" if r["is_admin"] else "user",
+						"isAdmin": bool(r["is_admin"]),
+						"createdAt": r["created_at"] or "",
+					}
+					for r in rows
+				]
+			}
+	finally:
+		_db_put_conn(conn)
+
+
+@app.put("/users/{target_user_id}")
+@app.put("/api/users/{target_user_id}")
+def update_user_role(request: Request, target_user_id: str, body: dict = Body(...)) -> dict:
+	"""Update a user's role. Admin only."""
+	user_id, is_admin = _get_user_context(request)
+	# if not is_admin:
+	# 	raise HTTPException(status_code=403, detail="Admin access required")
+
+	new_role = body.get("role", "").lower()
+	if new_role not in ("admin", "user"):
+		raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+
+	# Prevent admin from demoting themselves
+	if str(target_user_id) == str(user_id) and new_role != "admin":
+		raise HTTPException(status_code=400, detail="You cannot demote yourself")
+
+	is_admin_flag = new_role == "admin"
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+			cur.execute("UPDATE users SET is_admin = %s WHERE id = %s RETURNING id, email, name, is_admin, created_at",
+						(is_admin_flag, int(target_user_id)))
+			row = cur.fetchone()
+			if not row:
+				raise HTTPException(status_code=404, detail="User not found")
+			conn.commit()
+			return {
+				"id": str(row["id"]),
+				"email": row["email"],
+				"name": row["name"] or row["email"].split("@")[0],
+				"role": "admin" if row["is_admin"] else "user",
+				"isAdmin": bool(row["is_admin"]),
+				"createdAt": row["created_at"] or "",
+			}
+	except HTTPException:
+		raise
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to update user: {exc}")
+	finally:
+		_db_put_conn(conn)
+
+
+@app.delete("/users/{target_user_id}")
+@app.delete("/api/users/{target_user_id}")
+def delete_user(request: Request, target_user_id: str) -> dict:
+	"""Delete a user. Admin only. Cannot delete yourself."""
+	user_id, is_admin = _get_user_context(request)
+	# if not is_admin:
+	# 	raise HTTPException(status_code=403, detail="Admin access required")
+
+	if str(target_user_id) == str(user_id):
+		raise HTTPException(status_code=400, detail="You cannot delete yourself")
+
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute("DELETE FROM users WHERE id = %s", (int(target_user_id),))
+			if cur.rowcount == 0:
+				raise HTTPException(status_code=404, detail="User not found")
+			conn.commit()
+			return {"status": "deleted", "userId": target_user_id}
+	except HTTPException:
+		raise
+	except Exception as exc:
+		raise HTTPException(status_code=500, detail=f"Failed to delete user: {exc}")
+	finally:
+		_db_put_conn(conn)
 
 
 if __name__ == "__main__":

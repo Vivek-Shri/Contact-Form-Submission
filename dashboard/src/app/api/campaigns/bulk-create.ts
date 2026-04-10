@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
 
-  let body: any;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
@@ -15,8 +15,8 @@ export async function POST(request: Request) {
 
   try {
     // Forward to backend with 1500 submissions
-    const payload = (body && typeof body === 'object' && !Array.isArray(body))
-      ? { ...body, count: 1500 }
+    const payload = (body && typeof body === "object" && !Array.isArray(body))
+      ? { ...(body as Record<string, unknown>), count: 1500 }
       : { count: 1500 };
     const result = await backendJson(`/api/campaigns/bulk-create`, {
       method: "POST",

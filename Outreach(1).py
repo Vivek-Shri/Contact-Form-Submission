@@ -787,6 +787,7 @@ class TokenTracker:
 token_tracker = TokenTracker()
 _STOP_FLAG = threading.Event()
 OUTREACH_MAX_DAILY_SUBMISSIONS = max(0, int(str(os.environ.get("OUTREACH_MAX_DAILY_SUBMISSIONS", "0") or "0").strip() or "0"))
+OUTREACH_BREAK_ON_FAILURE = str(os.environ.get("OUTREACH_BREAK_ON_FAILURE", "0")).strip().lower() in {"1", "true", "yes", "on"}
 _success_counter = 0
 _success_lock = threading.Lock()
 
@@ -1134,6 +1135,10 @@ def _emit_result(company_name, url, submitted, assurance, captcha_status,
             if _success_counter >= OUTREACH_MAX_DAILY_SUBMISSIONS:
                 print(f"\n[LIMIT] Reached limit of {OUTREACH_MAX_DAILY_SUBMISSIONS} successful submissions! Initiating shutdown.")
                 _STOP_FLAG.set()
+
+    if (not submitted_overall) and OUTREACH_BREAK_ON_FAILURE:
+        print(f"\n[BREAK] Submission failed and 'Break on Failure' is enabled! Initiating shutdown.")
+        _STOP_FLAG.set()
 
     nopecha_credit_used, nopecha_credit_left = _nopecha_credit_for_row(str(captcha_status or ""))
     nopecha_solves = _nopecha_solves_from_credit_used(nopecha_credit_used)

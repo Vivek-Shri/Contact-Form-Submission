@@ -179,7 +179,20 @@ export function toDashboardSnapshot(
 ): OutreachRunSnapshot {
   const runId = payloadRunId(statusPayload) || "unknown";
   const runningFlag = Boolean(statusPayload.running);
-  const status = mapRunStatus(asString(statusPayload.status), runningFlag);
+  
+  let rawStatus = asString(statusPayload.status);
+  // WORKAROUND: If backend says it's running but the `running` flag is false, assume completed.
+  if (rawStatus === "running" && !runningFlag) {
+    if (statusPayload.exit_code === 0 || statusPayload.exitCode === 0) {
+      rawStatus = "completed";
+    } else if (statusPayload.exit_code !== undefined && statusPayload.exit_code !== null) {
+      rawStatus = "failed";
+    } else {
+      rawStatus = "stopped";
+    }
+  }
+
+  const status = mapRunStatus(rawStatus, runningFlag);
   const inlineLogs = collectLogs(statusPayload.logs);
   const finalLogs = logs.length > 0 ? logs : inlineLogs;
 
@@ -299,11 +312,17 @@ export function buildSnapshotFromStartPayload(payload: Record<string, unknown>):
 
 export async function fetchBackendSnapshot(
   requestedRunId?: string,
+  options?: { userId?: string; isAdmin?: boolean }
 ): Promise<OutreachRunSnapshot | null> {
   const backendBaseUrl = resolveBackendBaseUrl();
+  const headers = {} as Record<string, string>;
+  if (options?.userId) headers["X-User-Id"] = options.userId;
+  if (options?.isAdmin) headers["X-Is-Admin"] = "true";
+
   const statusResponse = await fetch(`${backendBaseUrl}/outreach/status`, {
     method: "GET",
     cache: "no-store",
+    headers
   });
 
   if (statusResponse.status === 404) {
@@ -326,11 +345,15 @@ export async function fetchBackendSnapshot(
       return null;
     }
 
-    if (backendRunId !== requestedRunId) {
+    if (requestedRunId === "current") {
+      if (backendStatus === "idle" && !statusPayload.running) {
+        return null; // Not active
+      }
+    } else if (backendRunId !== requestedRunId) {
       return null;
     }
 
-    if (backendStatus === "idle") {
+    if (backendStatus === "idle" && requestedRunId !== "current") {
       return null;
     }
   }
@@ -341,6 +364,7 @@ export async function fetchBackendSnapshot(
     const logsResponse = await fetch(logsUrl, {
       method: "GET",
       cache: "no-store",
+      headers
     });
 
     if (logsResponse.ok) {

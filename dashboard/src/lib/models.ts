@@ -20,6 +20,15 @@ export interface CampaignRunSummary {
   duplicatesSkipped: number;
 }
 
+export interface CampaignStep {
+  id: string;
+  aiInstruction: string;
+  daySequence: number;
+  timeOfDay: string;
+  type: "immediate" | "normal";
+  enabled: boolean;
+}
+
 export interface CampaignRecord {
   id: string;
   name: string;
@@ -27,7 +36,10 @@ export interface CampaignRecord {
   aiInstruction: string;
   maxDailySubmissions: number;
   searchForForm: boolean;
-  steps: string[];
+  breakFlag: boolean;
+  steps: CampaignStep[];
+  scheduleDay?: string;
+  scheduleTime?: string;
   contactCount: number;
   createdAt: string;
   updatedAt: string;

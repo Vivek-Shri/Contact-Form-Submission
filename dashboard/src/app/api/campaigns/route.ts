@@ -1,11 +1,17 @@
-import { NextResponse } from "next/server";
-
 import { backendJson, extractError } from "@/lib/backend-proxy";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const q = url.searchParams.get("q")?.trim() || "";
   const page = url.searchParams.get("page")?.trim() || "";
@@ -24,9 +30,11 @@ export async function GET(request: Request) {
   const query = params.toString();
 
   try {
-    const result = await backendJson(`/api/campaigns${query ? `?${query}` : ""}`, {
-      method: "GET",
-    });
+    const result = await backendJson(
+      `/api/campaigns${query ? `?${query}` : ""}`,
+      { method: "GET" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
     if (!result.ok) {
       return NextResponse.json(
         { error: extractError(result.payload, "Unable to load campaigns.") },
@@ -42,6 +50,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: unknown;
 
   try {
@@ -51,13 +64,15 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await backendJson("/api/campaigns", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    const result = await backendJson(
+      "/api/campaigns",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
 
     if (!result.ok) {
       console.log("[POST /api/campaigns] Backend error:", result.status, result.payload);

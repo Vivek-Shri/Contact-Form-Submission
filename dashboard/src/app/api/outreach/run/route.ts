@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 import {
   buildSnapshotFromStartPayload,
@@ -58,6 +60,11 @@ function payloadRunId(payload: Record<string, unknown> | null): string | null {
 }
 
 export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: StartRunRequestBody;
 
   try {
@@ -94,6 +101,8 @@ export async function POST(request: Request) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-User-Id": (session.user as any).id,
+        "X-Is-Admin": (session.user as any).isAdmin ? "true" : "false",
       },
       cache: "no-store",
       body: JSON.stringify({
@@ -133,7 +142,8 @@ export async function POST(request: Request) {
     }
 
     const runId = payloadRunId(payload);
-    const snapshot = runId ? await fetchBackendSnapshot(runId) : null;
+    const options = { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin };
+    const snapshot = runId ? await fetchBackendSnapshot(runId, options) : null;
     return NextResponse.json(snapshot ?? buildSnapshotFromStartPayload(payload), { status: 200 });
   } catch (error) {
     const err = error as Error;
@@ -147,6 +157,11 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const runId = url.searchParams.get("runId")?.trim();
 
@@ -155,7 +170,8 @@ export async function GET(request: Request) {
   }
 
   try {
-    const snapshot = await fetchBackendSnapshot(runId);
+    const options = { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin };
+    const snapshot = await fetchBackendSnapshot(runId, options);
     if (!snapshot) {
       return NextResponse.json({ error: "Run not found." }, { status: 404 });
     }

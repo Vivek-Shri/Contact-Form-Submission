@@ -6,33 +6,33 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(request: Request) {
+export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // if (!(session.user as any).isAdmin) {
+  //   return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+  // }
+
   try {
-    const payload = await request.json();
     const result = await backendJson(
-      "/api/contacts/bulk",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+      "/api/users",
+      { method: "GET" },
+      { userId: (session.user as any).id, isAdmin: true }
     );
 
     if (!result.ok) {
       return NextResponse.json(
-        { error: extractError(result.payload, "Failed to bulk import contacts") },
+        { error: extractError(result.payload, "Unable to load users.") },
         { status: result.status || 500 }
       );
     }
-    return NextResponse.json(result.payload, { status: 200 });
+
+    return NextResponse.json(result.payload ?? { users: [] }, { status: 200 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to bulk import contacts";
+    const message = error instanceof Error ? error.message : "Unable to load users.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -370,6 +370,15 @@ def _run_subprocess(run_id, csv_path, cfg):
         captchas = 0
         processed = 0
 
+
+        # Get the daily success limit from config (default 600 if not set)
+        max_success = 15000
+        try:
+            if "maxDailySubmissions" in cfg:
+                max_success = int(cfg["maxDailySubmissions"])
+        except Exception:
+            pass
+
         for line in proc.stdout:
             line = line.rstrip("\n\r")
             with run_lock:
@@ -438,6 +447,19 @@ def _run_subprocess(run_id, csv_path, cfg):
                 except Exception as e:
                     print(f"[Dashboard] DB insert error: {e}")
 
+                # ENFORCE DAILY SUCCESS LIMIT
+                if successful >= max_success:
+                    with run_lock:
+                        active_run["status"] = "stopped"
+                        active_run["logs"].append(f"[Dashboard] Stopped: Reached daily success limit of {max_success}.")
+                        if active_run["process"]:
+                            try:
+                                active_run["process"].terminate()
+                            except Exception:
+                                pass
+                            active_run["process"] = None
+                    break
+
             elif "Processing" in line and "of" in line:
                 import re
                 m = re.search(r'(\d+)\s+of\s+(\d+)', line)
@@ -494,8 +516,11 @@ def start_run():
 
     data = request.get_json() or {}
     filename = data.get("filename")
+    max_daily = data.get("maxDailySubmissions")
     if not filename:
         return jsonify({"error": "No CSV filename specified"}), 400
+    if not isinstance(max_daily, int) or max_daily < 1:
+        return jsonify({"error": "maxDailySubmissions must be a positive integer"}), 400
 
     csv_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
     if not os.path.exists(csv_path):
@@ -506,6 +531,7 @@ def start_run():
         total_leads = sum(1 for _ in csv.DictReader(f))
 
     cfg = load_config()
+    cfg["maxDailySubmissions"] = max_daily  # inject campaign-specific limit
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     db = get_db()

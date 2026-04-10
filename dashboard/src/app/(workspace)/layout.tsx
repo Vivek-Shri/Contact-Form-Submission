@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, redirect } from "next/navigation";
-import { BarChart3, FolderKanban, Users, LogOut } from "lucide-react";
+import { usePathname, redirect, useRouter } from "next/navigation";
+import { BarChart3, FolderKanban, Users, LogOut, Shield, UserPlus } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 
 const NAV_ITEMS = [
@@ -10,16 +10,25 @@ const NAV_ITEMS = [
     href: "/overview",
     label: "Overview",
     icon: BarChart3,
+    adminOnly: false,
   },
   {
     href: "/campaigns",
     label: "Campaigns",
     icon: FolderKanban,
+    adminOnly: false,
   },
   {
     href: "/contacts",
     label: "Contacts",
     icon: Users,
+    adminOnly: false,
+  },
+  {
+    href: "/users",
+    label: "User Management",
+    icon: Shield,
+    adminOnly: true,
   },
 ];
 
@@ -29,6 +38,7 @@ export default function WorkspaceLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { status, data: session } = useSession({
     required: true,
     onUnauthenticated() {
@@ -40,6 +50,8 @@ export default function WorkspaceLayout({
     return <div className="flex h-screen items-center justify-center">Loading...</div>;
   }
 
+  const isAdmin = (session?.user as any)?.isAdmin || false;
+
   return (
     <div className="studio-shell">
       <aside className="studio-sidebar">
@@ -50,20 +62,38 @@ export default function WorkspaceLayout({
         </div>
 
         <nav className="studio-nav">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`studio-nav-link ${active ? "is-active" : ""}`}
-              >
-                <Icon size={16} />
-                <span>{item.label}</span>
-              </Link>
-            );
-          })}
+          {NAV_ITEMS
+            .filter((item) => !item.adminOnly || isAdmin)
+            .map((item) => {
+              const Icon = item.icon;
+              const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`studio-nav-link ${active ? "is-active" : ""}`}
+                >
+                  <Icon size={16} />
+                  <span>{item.label}</span>
+                  {item.adminOnly && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        fontSize: "9px",
+                        fontWeight: 700,
+                        color: "#7c3aed",
+                        background: "#ede9fe",
+                        padding: "2px 6px",
+                        borderRadius: "4px",
+                        letterSpacing: "0.5px",
+                      }}
+                    >
+                      ADMIN
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
         </nav>
         
         <div className="mt-auto p-4 border-t border-zinc-200">
@@ -72,10 +102,39 @@ export default function WorkspaceLayout({
               {session?.user?.name?.charAt(0).toUpperCase() || 'U'}
             </div>
             <div className="flex-1 truncate">
-              <p className="text-sm font-medium text-zinc-900 truncate">{session?.user?.name}</p>
+              <p className="text-sm font-medium text-zinc-900 truncate">
+                {session?.user?.name}
+                {isAdmin && (
+                  <span style={{
+                    marginLeft: "6px",
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    color: "#7c3aed",
+                    background: "#ede9fe",
+                    padding: "1px 5px",
+                    borderRadius: "3px",
+                  }}>
+                    ADMIN
+                  </span>
+                )}
+              </p>
               <p className="text-xs text-zinc-500 truncate">{session?.user?.email}</p>
             </div>
           </div>
+          <button 
+            onClick={() => router.push('/users')}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-emerald-700 transition-colors hover:bg-emerald-50 mb-1"
+          >
+            <Users size={16} />
+            <span>Users</span>
+          </button>
+          <button 
+            onClick={() => router.push('/signup')}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-emerald-700 transition-colors hover:bg-emerald-50 mb-1"
+          >
+            <UserPlus size={16} />
+            <span>Create Account</span>
+          </button>
           <button 
             onClick={() => signOut({ callbackUrl: '/login' })}
             className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
@@ -88,7 +147,7 @@ export default function WorkspaceLayout({
 
       <div className="studio-main">
         <div className="studio-topbar">
-          <p>Route-based frontend connected to backend APIs and MongoDB collections.</p>
+          <p>Route-based frontend connected to backend APIs and PostgreSQL.</p>
         </div>
         <main className="studio-content">{children}</main>
       </div>

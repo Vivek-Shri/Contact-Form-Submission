@@ -73,14 +73,34 @@ export default function OverviewPage() {
             return;
           }
         }
-        // Fallback to status endpoint
         const statusRes = await fetch("/api/outreach/status", { cache: "no-store" }).catch(() => null);
         if (statusRes && statusRes.ok) {
-          const data = await statusRes.json() as any;
-          if (data && data.run_id && (data.status === "running" || data.running)) {
+          const data = await statusRes.json() as {
+            run_id?: string;
+            status?: string;
+            running?: boolean;
+            exit_code?: number;
+            progress?: number;
+            total_leads?: number;
+            processed_leads?: number;
+            current_lead?: string;
+            logs?: string[];
+            results?: unknown[];
+            duplicates_skipped?: number;
+            started_at?: string;
+          };
+          if (data && data.run_id) {
+            let status = data.status || "idle";
+            const runningFlag = Boolean(data.running);
+            if (status === "running" && !runningFlag) {
+              if (data.exit_code === 0) status = "completed";
+              else if (data.exit_code !== undefined && data.exit_code !== null) status = "failed";
+              else status = "stopped";
+            }
+            
             setLiveRun({
               runId: data.run_id,
-              status: data.status || "running",
+              status: status,
               progress: data.progress ?? 0,
               totalLeads: data.total_leads ?? 0,
               processedLeads: data.processed_leads ?? 0,
@@ -134,6 +154,53 @@ export default function OverviewPage() {
     [campaigns],
   );
 
+  const getBannerConfig = (status: string) => {
+    switch (status) {
+      case "completed":
+        return {
+          title: "Run Completed",
+          border: "#3b82f6",
+          bg: "linear-gradient(135deg, #eff6ff, #dbeafe)",
+          titleColor: "#1e3a8a",
+          showStop: false,
+          progressBg: "#bfdbfe",
+          progressFill: "#2563eb",
+        };
+      case "failed":
+        return {
+          title: "Run Failed",
+          border: "#ef4444",
+          bg: "linear-gradient(135deg, #fef2f2, #fee2e2)",
+          titleColor: "#991b1b",
+          showStop: false,
+          progressBg: "#fecaca",
+          progressFill: "#dc2626",
+        };
+      case "stopped":
+      case "stopping":
+      case "cancelled":
+        return {
+          title: "Run Stopped",
+          border: "#f59e0b",
+          bg: "linear-gradient(135deg, #fffbeb, #fef3c7)",
+          titleColor: "#92400e",
+          showStop: false,
+          progressBg: "#fde68a",
+          progressFill: "#d97706",
+        };
+      default:
+        return {
+          title: "Run In Progress",
+          border: "#22c55e",
+          bg: "linear-gradient(135deg, #f0fdf4, #dcfce7)",
+          titleColor: "#166534",
+          showStop: true,
+          progressBg: "#bbf7d0",
+          progressFill: "#16a34a",
+        };
+    }
+  };
+
   if (loading) {
     return <p className="panel-muted">Loading overview...</p>;
   }
@@ -142,34 +209,43 @@ export default function OverviewPage() {
     return <p className="panel-error">{error}</p>;
   }
 
+  const runBanner = liveRun ? getBannerConfig(liveRun.status) : null;
+
   return (
     <div className="page-stack">
       {/* Live Run Banner */}
-      {liveRun && (liveRun.status === "running" || liveRun.status === "queued") && (
-        <section className="panel" style={{ borderLeft: "4px solid #22c55e", background: "linear-gradient(135deg, #f0fdf4, #dcfce7)" }}>
+      {liveRun && runBanner && (
+        <section className="panel" style={{ borderLeft: `4px solid ${runBanner.border}`, background: runBanner.bg }}>
           <div className="panel-header" style={{ gap: "1rem" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-              <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", display: "inline-block", animation: "pulse 1.5s infinite" }} />
-              <h2 style={{ color: "#166534", margin: 0 }}>Run In Progress</h2>
+              {runBanner.showStop && (
+                <span style={{ width: 10, height: 10, borderRadius: "50%", background: runBanner.border, display: "inline-block", animation: "pulse 1.5s infinite" }} />
+              )}
+              {!runBanner.showStop && (
+                <span style={{ width: 10, height: 10, borderRadius: "50%", background: runBanner.border, display: "inline-block" }} />
+              )}
+              <h2 style={{ color: runBanner.titleColor, margin: 0 }}>{runBanner.title}</h2>
             </div>
-            <button
-              type="button"
-              onClick={() => void stopRun()}
-              disabled={stoppingRun}
-              style={{
-                background: stoppingRun ? "#dc2626" : "#ef4444",
-                color: "#fff",
-                border: "none",
-                borderRadius: "8px",
-                padding: "0.5rem 1.25rem",
-                fontWeight: 600,
-                cursor: stoppingRun ? "not-allowed" : "pointer",
-                opacity: stoppingRun ? 0.7 : 1,
-                fontSize: "0.875rem",
-              }}
-            >
-              {stoppingRun ? "Stopping..." : "⏹ Stop Run"}
-            </button>
+            {runBanner.showStop && (
+              <button
+                type="button"
+                onClick={() => void stopRun()}
+                disabled={stoppingRun}
+                style={{
+                  background: stoppingRun ? "#dc2626" : "#ef4444",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "8px",
+                  padding: "0.5rem 1.25rem",
+                  fontWeight: 600,
+                  cursor: stoppingRun ? "not-allowed" : "pointer",
+                  opacity: stoppingRun ? 0.7 : 1,
+                  fontSize: "0.875rem",
+                }}
+              >
+                {stoppingRun ? "Stopping..." : "⏹ Stop Run"}
+              </button>
+            )}
           </div>
           <div style={{ padding: "0.5rem 1.5rem 1rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "1rem" }}>
             <div>
@@ -178,9 +254,9 @@ export default function OverviewPage() {
             </div>
             <div>
               <p className="meta-label">Progress</p>
-              <p style={{ fontWeight: 600, color: "#166534" }}>{liveRun.processedLeads} / {liveRun.totalLeads}</p>
-              <div style={{ background: "#bbf7d0", borderRadius: 4, height: 6, marginTop: 4 }}>
-                <div style={{ background: "#16a34a", height: 6, borderRadius: 4, width: `${liveRun.progress ?? 0}%`, transition: "width 0.4s" }} />
+              <p style={{ fontWeight: 600, color: runBanner.titleColor }}>{liveRun.processedLeads} / {liveRun.totalLeads}</p>
+              <div style={{ background: runBanner.progressBg, borderRadius: 4, height: 6, marginTop: 4 }}>
+                <div style={{ background: runBanner.progressFill, height: 6, borderRadius: 4, width: `${liveRun.progress ?? 0}%`, transition: "width 0.4s" }} />
               </div>
             </div>
             <div>

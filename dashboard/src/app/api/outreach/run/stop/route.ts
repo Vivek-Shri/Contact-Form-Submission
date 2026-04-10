@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 import {
   extractBackendErrorMessage,
@@ -29,6 +31,11 @@ function payloadRunId(payload: Record<string, unknown> | null): string | null {
 }
 
 export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: StopRunBody = {};
 
   try {
@@ -45,6 +52,8 @@ export async function POST(request: Request) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-User-Id": (session.user as any).id,
+        "X-Is-Admin": (session.user as any).isAdmin ? "true" : "false",
       },
       cache: "no-store",
       body: JSON.stringify({ run_id: requestedRunId || undefined }),
@@ -55,7 +64,8 @@ export async function POST(request: Request) {
     if (!backendResponse.ok) {
       if (backendResponse.status === 409) {
         if (requestedRunId) {
-          const existingSnapshot = await fetchBackendSnapshot(requestedRunId);
+          const options = { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin };
+          const existingSnapshot = await fetchBackendSnapshot(requestedRunId, options);
           if (existingSnapshot) {
             return NextResponse.json(existingSnapshot, { status: 200 });
           }
@@ -70,7 +80,8 @@ export async function POST(request: Request) {
 
     const resolvedRunId = requestedRunId || payloadRunId(payload);
     if (resolvedRunId) {
-      const snapshot = await fetchBackendSnapshot(resolvedRunId);
+      const options = { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin };
+      const snapshot = await fetchBackendSnapshot(resolvedRunId, options);
       if (snapshot) {
         return NextResponse.json(snapshot, { status: 200 });
       }

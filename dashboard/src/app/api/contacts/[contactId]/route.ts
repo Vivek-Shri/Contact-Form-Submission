@@ -1,5 +1,7 @@
-import { NextResponse } from "next/server";
 import { backendJson, extractError } from "@/lib/backend-proxy";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 export const runtime = "nodejs";
 
@@ -7,11 +9,18 @@ export async function DELETE(
   request: Request,
   { params }: { params: Promise<{ contactId: string }> }
 ) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const { contactId } = await params;
-    const result = await backendJson(`/api/contacts/${contactId}`, {
-      method: "DELETE",
-    });
+    const result = await backendJson(
+      `/api/contacts/${contactId}`,
+      { method: "DELETE" },
+      { userId: (session.user as any).id, isAdmin: (session.user as any).isAdmin }
+    );
 
     if (!result.ok) {
       return NextResponse.json(
