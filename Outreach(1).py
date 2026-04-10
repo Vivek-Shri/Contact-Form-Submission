@@ -78,8 +78,8 @@ OPENAI_FORM_FILL_MODEL = str(os.environ.get("OPENAI_FORM_FILL_MODEL", "gpt-5-nan
 SPREADSHEET_ID     = os.environ.get("SPREADSHEET_ID", "1H5ZyBKwKfoXledQgEDk9LvO4KDXzH3plkeamgEXhrWs")
 CREDS_FILE         = str(os.environ.get("CREDS_FILE", "google_credentials.json") or "google_credentials.json").strip()
 NOPECHA_API_KEYS   = [
-    "sub_1TE68RCRwBwvt6ptOHR2oZ2o",      # Key 1
-    "sub_1TGgdMCRwBwvt6pt1NbN2LQx",      # Key 2 (20k solves/day)
+    str(os.environ.get("NOPECHA_KEY_1", "") or "").strip(),
+    str(os.environ.get("NOPECHA_KEY_2", "") or "").strip(),
 ]
 _nopecha_key_states = {k: True for k in NOPECHA_API_KEYS}
 _nopecha_lock = threading.Lock()
